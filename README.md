@@ -1,1 +1,1 @@
-# kubevirt-garbage-collector
+# KubeVirt Day 2 Scripts
