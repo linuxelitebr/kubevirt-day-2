@@ -121,8 +121,58 @@ Applies to virtio disks only (virtio-blk, virtio-scsi). Requires a restart.
 
 - `inputs.bus: usb` matches the official templates. `vioinput` on Windows is less mature than
   `viostor`, and the complaint usually involves mouse and menu responsiveness.
-- `terminationGracePeriodSeconds: 3600` replaces the Forklift default, which is too short for a
-  Windows shutdown with pending updates. Protects against a dirty shutdown.
+- `terminationGracePeriodSeconds: 3600` overrides the KubeVirt default of 30 seconds. Forklift never
+  sets the field, so the webhook fills in the default. Thirty seconds is too short for a Windows
+  shutdown with pending updates, and killing the guest mid-update can leave a corrupt registry hive.
+  It is a ceiling, not a delay: a guest that stops in 40 seconds terminates in 40. On expiry
+  virt-handler switches from ACPI to `virsh destroy --graceful`, which from the guest's point of
+  view is still pulling the plug. The cost is that a node drain can stall for up to an hour per
+  stuck VM; `virtctl stop <vm> --force --grace-period=0` is the escape hatch.
+
+## Conditional: VBS and nested virtualization (not baseline)
+
+`features.hyperv.evmcs` addresses a different symptom and belongs to a different decision. Do not
+add it to the baseline patch.
+
+VMCS is the Intel VT-x structure a hypervisor uses to control VM execution, read and written with
+the `VMREAD` and `VMWRITE` instructions. This only matters when the guest is itself a hypervisor.
+VBS, HVCI, Credential Guard, WSL2 and the Hyper-V role all place a thin hypervisor underneath
+Windows, making it an L1. L1 cannot touch real hardware VMCS, so every access traps to L0 and gets
+emulated. Hyper-V does hundreds of thousands of those per second. `evmcs` replaces the instruction
+path with a shared memory page plus a dirty bitmap, so L1 writes fields with plain stores and exits
+once per `VMLAUNCH`.
+
+The symptom is high CPU in the guest and on the node, including at idle. That is the opposite of the
+interactive-latency-with-normal-CPU pattern the baseline patch addresses. Do not conflate them.
+
+Three gates, in order of cost:
+
+1. Is `vmx` exposed at all? `virsh dumpxml 1 | grep -i vmx` inside the launcher. Nothing there means
+   VBS cannot run in any Windows version, and the question is closed cluster-wide until the CPU
+   model changes.
+2. Is VBS actually running? `Get-CimInstance -ClassName Win32_DeviceGuard -Namespace
+   root\Microsoft\Windows\DeviceGuard` and read `VirtualizationBasedSecurityStatus`. `1` is enabled
+   but not running, `2` is running. Only `2` justifies going further. The Windows UI reports both
+   as "Enabled", which is where most false positives come from.
+3. Does the node offer the feature? `oc get node <node> -o json | jq -r '.metadata.labels | keys[] |
+   select(startswith("hyperv.node.kubevirt.io/"))'`.
+
+Field observation from this fleet: VMs with VBS reported active show no performance complaint, while
+VMs without it do. VBS presence is not a differentiator here. Treat `evmcs` as a per-VM fix for a
+measured symptom, never as a fleet default.
+
+`evmcs` is Intel only. On an AMD node the corresponding label does not exist, and with
+`HypervStrictCheck` enabled the VM goes Pending on node selector. In a mixed fleet, adding it to the
+baseline buys a scheduling constraint in exchange for nothing.
+
+Windows version changes where to look, not the rule. Server 2019 and 2022 ship VBS off, so it only
+appears where a GPO turned it on. Server 2025 enables Credential Guard by default on domain-joined
+non-DC systems, which turns VBS on with it, so the assumption inverts and you confirm the negative.
+
+Separately, `hv-tlbflush-direct` and `hv-tlbflush-extended` are not the same as the `tlbflush: {}`
+already in the baseline above. Whether they have an API knob depends on the CNV version. Check the
+CRD rather than any document: `oc explain
+virtualmachine.spec.template.spec.domain.features.hyperv --recursive`.
 
 ## Applying
 
