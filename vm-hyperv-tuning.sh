@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# vm-hyperv-tuning.sh - v1.0
+# vm-hyperv-tuning.sh - v1.2
 #
 # Aplica o baseline Windows ausente em VMs migradas por MTV/Forklift:
 # features.hyperv, clock.timer, ioThreadsPolicy e terminationGracePeriodSeconds.
@@ -8,8 +8,9 @@
 # Rode `./vm-hyperv-tuning.sh -h` para o guia de uso.
 #
 set -euo pipefail
+export LC_ALL=C   # ordenacao deterministica para sort/comm/comparacao de timestamp
 
-VERSION="1.0"
+VERSION="1.2"
 
 OUTDIR="./hyperv-tuning"
 PLAN=""
@@ -88,7 +89,12 @@ OPCOES
   --dry-run       server-side. Valida o delta completo sem gravar.
   --yes           pula a confirmacao interativa.
   -o DIR          diretorio de saida do audit. Padrao ./hyperv-tuning
-  -h              esta ajuda.
+  -h              esta ajuda. Funciona sem oc e sem jq instalados.
+
+DEPENDENCIAS
+  oc, jq (com suporte a regex), sha256sum, comm, awk.
+  Sao verificadas antes de qualquer acao. Faltando qualquer uma, o script
+  para com exit 2 e diz o que instalar.
 
 EXEMPLOS
   ./vm-hyperv-tuning.sh audit --all
@@ -148,9 +154,33 @@ cluster_id() {
 }
 
 preflight() {
-  command -v oc >/dev/null || die "oc nao encontrado no PATH"
-  command -v jq >/dev/null || die "jq nao encontrado no PATH"
-  oc whoami >/dev/null 2>&1 || die "sem sessao ativa. Rode 'oc login' no cluster alvo."
+  local -a faltando=()
+  command -v oc        >/dev/null 2>&1 || faltando+=("oc")
+  command -v jq        >/dev/null 2>&1 || faltando+=("jq")
+  command -v sha256sum >/dev/null 2>&1 || faltando+=("sha256sum")
+  command -v comm      >/dev/null 2>&1 || faltando+=("comm")
+  command -v awk       >/dev/null 2>&1 || faltando+=("awk")
+
+  if (( ${#faltando[@]} )); then
+    {
+      echo "ERRO: dependencia ausente no PATH: ${faltando[*]}"
+      echo
+      echo "  RHEL / Fedora:   sudo dnf install -y jq coreutils gawk"
+      echo "  Debian / Ubuntu: sudo apt-get install -y jq coreutils gawk"
+      echo "  oc:              https://console.redhat.com/openshift/downloads"
+      echo
+      echo "  jq e obrigatorio. Todo o audit, a verificacao de delta e a"
+      echo "  geracao do undo dependem dele. Nao ha modo degradado."
+    } >&2
+    exit 2
+  fi
+
+  # algumas builds minimas do jq vem sem oniguruma e nao tem test() nem gsub()
+  jq -n '"x" | test("x")' >/dev/null 2>&1 \
+    || die "este jq nao tem suporte a regex (test/gsub). Use o jq da distribuicao, nao um binario minimo."
+
+  oc whoami >/dev/null 2>&1 \
+    || die "sem sessao ativa no cluster. Rode 'oc login' no cluster alvo antes."
 }
 
 # ---------------------------------------------------------------- jq helpers
@@ -176,9 +206,9 @@ matches_target() {
     | ($t.domain.features.hyperv // {})  as $h
     | ($t.domain.clock.timer // {})      as $ck
     | ((($hv - ($h|keys)) | length) == 0)
-      and (($h.spinlocks.spinlocks // -1) == ($spin|tonumber))
-      and (($h.synictimer.direct // null) != null)
-      and ((($ck.hpet // {}).present // true) == false)
+      and ((($h.spinlocks // {}).spinlocks // -1) == ($spin|tonumber))
+      and (($h.synictimer // {}) | has("direct"))
+      and ($ck.hpet.present == false)
       and ($ck | has("hyperv"))
       and ((($ck.pit // {}).tickPolicy // "") == "delay")
       and ((($ck.rtc // {}).tickPolicy // "") == "catchup")
@@ -188,11 +218,6 @@ matches_target() {
 }
 
 read -r -d '' JQ_AUDIT <<'JQEOF' || true
-($hv_keys)        as $HV
-($grace|tonumber) as $GRACE
-($spin|tonumber)  as $SPIN
-($vmis | map({key:"\(.metadata.namespace)/\(.metadata.name)", value:.}) | from_entries) as $VMIS
-
 def owner:
   (.metadata.annotations // {}) as $a
   | (.metadata.labels // {})    as $l
@@ -208,17 +233,17 @@ def hv_state:
   (.spec.template.spec.domain.features.hyperv // null) as $h
   | if $h == null then "ABSENT"
     else
-      (($HV - ($h|keys)) | length) as $missing
+      (($hv_keys - ($h|keys)) | length) as $missing
       | if $missing > 0 then "PARTIAL"
-        elif ($h.spinlocks.spinlocks // -1) != $SPIN then "PARTIAL"
-        elif ($h.synictimer.direct // null) == null  then "PARTIAL"
+        elif (($h.spinlocks // {}).spinlocks // -1) != ($spin|tonumber) then "PARTIAL"
+        elif (($h.synictimer // {}) | has("direct") | not)               then "PARTIAL"
         else "COMPLETE" end
     end;
 
 def clock_state:
   (.spec.template.spec.domain.clock.timer // null) as $t
   | if $t == null then "ABSENT"
-    elif (($t.hpet // {}).present // true) == false
+    elif ($t.hpet.present == false)
          and ($t|has("hyperv"))
          and ((($t.pit // {}).tickPolicy // "") == "delay")
          and ((($t.rtc // {}).tickPolicy // "") == "catchup") then "COMPLETE"
@@ -231,41 +256,43 @@ def clock_offset:
     elif ($c|has("timezone")) then "TIMEZONE"
     else "NONE" end;
 
-.items[]
+($vmisf[0] | map({key:"\(.metadata.namespace)/\(.metadata.name)", value:.}) | from_entries) as $VMIS
+| ($grace|tonumber) as $GRACE
+| .items[]
 | . as $vm
 | $vm.metadata.namespace as $ns
 | $vm.metadata.name      as $name
 | ($VMIS["\($ns)/\($name)"] // null)            as $vmi
-| (($vmi.status.guestOSInfo // {}).id   // "")  as $osid
-| (($vmi.status.guestOSInfo // {}).name // "")  as $osname
+| ((($vmi.status // {}).guestOSInfo // {}).id   // "")  as $osid
+| ((($vmi.status // {}).guestOSInfo // {}).name // "")  as $osname
 | ($vm.status.printableStatus // "Unknown")     as $pstatus
-| ($vm.spec.template.spec.terminationGracePeriodSeconds // -1) as $grace
+| ($vm.spec.template.spec.terminationGracePeriodSeconds // -1) as $g
 | ($vm.spec.template.spec.domain.ioThreadsPolicy // "")        as $iop
 | ($vm | hv_state)     as $hvs
 | ($vm | clock_state)  as $cks
 | ($vm | clock_offset) as $cko
 | ($vm | owner)        as $own
 | ([ ($vm.spec.template.spec.domain.devices.disks // [])[]
-     | (.disk.bus // .lun.bus // .cdrom.bus // "none") ] | unique | join(";")) as $buses
+     | ((.disk // {}).bus // (.lun // {}).bus // (.cdrom // {}).bus // "none") ] | unique | join(";")) as $buses
 | (($vm.metadata.labels // {})["vm.kubevirt.io/template"] // "-") as $tmpl
 | (if $pstatus != "Running" or $vmi == null then {c:"SKIP",  r:"NOT_RUNNING"}
    elif ($osid == "" and $osname == "")     then {c:"SKIP",  r:"NO_GUEST_AGENT"}
-   elif ($osid != "mswindows" and (($osname // "") | ascii_downcase | test("windows") | not))
+   elif ($osid != "mswindows" and ($osname | ascii_downcase | test("windows") | not))
                                             then {c:"SKIP",  r:"NOT_WINDOWS"}
    elif $own != null                        then {c:"BLOCK", r:"OWNED_BY_\($own)"}
    elif ($hvs == "PARTIAL" or $cks == "PARTIAL")
                                             then {c:"BLOCK", r:"PARTIAL_CONFIG_REVIEW"}
-   elif ($hvs == "COMPLETE" and $cks == "COMPLETE" and $iop != "" and $grace >= $GRACE)
+   elif ($hvs == "COMPLETE" and $cks == "COMPLETE" and $iop != "" and $g >= $GRACE)
                                             then {c:"SKIP",  r:"ALREADY_TUNED"}
-   elif ($hvs == "COMPLETE" and $cks == "COMPLETE" and $grace >= $GRACE)
+   elif ($hvs == "COMPLETE" and $cks == "COMPLETE" and $g >= $GRACE)
                                             then {c:"ELIGIBLE", r:"IOTHREADS_ONLY"}
    else {c:"ELIGIBLE", r:"MISSING_BASELINE"} end) as $cls
 | { namespace: $ns, vm: $name,
     classification: $cls.c, reason: $cls.r,
-    os: (if $osname == "" then $osid else $osname end),
+    os: ($osname | if . == "" then $osid else . end | gsub(",";" ")),
     hyperv: $hvs, clock: $cks, clock_offset: $cko,
     iothreads: (if $iop == "" then "ABSENT" else $iop end),
-    grace: ($grace|tostring),
+    grace: ($g|tostring),
     disk_buses: $buses,
     template: $tmpl,
     canon: ($vm.spec.template.spec | tojson) }
@@ -298,7 +325,7 @@ do_audit() {
     oc get vm "${q[@]}" -o json \
       | jq -c --argjson hv_keys "$HV_KEYS" \
              --arg grace "$GRACE_TARGET" --arg spin "$SPINLOCKS_TARGET" \
-             --argjson vmis "$(cat "$vmis")" \
+             --slurpfile vmisf "$vmis" \
              "$JQ_AUDIT" \
       | while IFS= read -r line; do
           local ns vm fp
@@ -333,8 +360,8 @@ do_audit() {
              END {for (k in c) printf "  %-45s %d\n", k, c[k]}' "$plan" | sort -k2 -rn
   echo
   echo "VMs com disco nao-virtio (ioThreadsPolicy fica inerte nelas):"
-  awk -F',' 'NR>1 {gsub(/"/,"",$4); gsub(/"/,"",$12);
-             if ($4=="ELIGIBLE" && $12 !~ /virtio/) print "  " $2 "/" $3 "  " $12}' "$plan" \
+  awk -F',' 'NR>1 {gsub(/"/,"",$2); gsub(/"/,"",$3); gsub(/"/,"",$4); gsub(/"/,"",$12);
+             if ($4=="ELIGIBLE" && $12 !~ /virtio/) print "  " $2 "/" $3 "  bus=" ($12=="" ? "-" : $12)}' "$plan" \
     | head -20
   echo
   echo "Proximo passo:  $0 apply -p $plan --dry-run"
@@ -402,8 +429,12 @@ do_apply() {
   [[ "$cid_now" == "$cid_plan" ]] || \
     die "guarda de identidade: plano gerado em '$cid_plan', sessao atual em '$cid_now'"
 
-  local age_h=$(( ( $(date +%s) - $(stat -c %Y "$PLAN") ) / 3600 ))
-  (( age_h > 24 )) && warn "plano tem ${age_h}h. Drift provavel. Considere refazer o audit."
+  local plan_mtime age_h
+  plan_mtime="$(stat -c %Y "$PLAN" 2>/dev/null || stat -f %m "$PLAN" 2>/dev/null || echo 0)"
+  if [[ "$plan_mtime" =~ ^[0-9]+$ ]] && (( plan_mtime > 0 )); then
+    age_h=$(( ( $(date +%s) - plan_mtime ) / 3600 ))
+    (( age_h > 24 )) && warn "plano tem ${age_h}h. Drift provavel. Considere refazer o audit."
+  fi
 
   has_explicit_scope || SCOPE_ALL=1
 
@@ -562,7 +593,7 @@ do_status() {
     in_scope "$a_ns" "$a_vm" || continue
     local vmi_ct
     vmi_ct="$(awk -F',' -v n="$a_ns" -v v="$a_vm" '$1==n && $2==v {print $3; exit}' "$vmis")"
-    if [[ -z "$vmi_ct" ]]; then
+    if [[ -z "$vmi_ct" || "$vmi_ct" == "null" ]]; then
       printf '%-45s %-24s %-12s %s\n' "$a_ns" "$a_vm" "PARADA" "entra ao ligar"
       n_stopped=$((n_stopped+1))
     elif [[ "$vmi_ct" > "$a_at" ]]; then
