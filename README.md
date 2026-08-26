@@ -25,8 +25,12 @@ oc login https://api.<cluster>:6443
 ```bash
 ./vm-hyperv-tuning.sh audit -n NAMESPACE
 ./vm-hyperv-tuning.sh apply -p ./hyperv-tuning/plan-XXX.csv --dry-run
+```
 
+```bash
 ./diff hyperv-tuning/diff-XXX/default__YYY.before.json hyperv-tuning/diff-XXX/default__YYY.after.json
+```
 
+```bash
 ./vm-hyperv-tuning.sh apply -p ./hyperv-tuning/plan-XXX.csv
 ```
