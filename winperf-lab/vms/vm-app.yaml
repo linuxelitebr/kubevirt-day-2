@@ -1,0 +1,98 @@
+# vm-app.yaml - VM Windows do lab (versao "correta": host-model, virtio, enlightenments inline).
+#
+# CRIE DUAS: winperf-a e winperf-b (mude metadata.name e labels.app fica "winperf" nas duas).
+# A app=winperf nas duas e' o que a anti-affinity/affinity usa pra juntar ou separar.
+#
+# DIMENSIONAMENTO (a contencao e' vCPU vs cores FISICOS do node, nao RAM):
+#   - Lab pequeno (seu):  cores = nº de cores fisicos do node  -> 2 VMs = 2x overcommit (reproduz o +2s)
+#   - Lab do cliente:     cores: 16, memory.guest: 96Gi        -> repro fiel
+#
+# DISCO: aponte para um golden image Windows SEU (com virtio-win ja instalado).
+#        Troque source.pvc abaixo, e confirme o firmware (BIOS vs UEFI) batendo com a instalacao do golden.
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: winperf-a
+  labels:
+    app: winperf
+spec:
+  runStrategy: Always
+  dataVolumeTemplates:
+    - metadata:
+        name: winperf-a-root
+      spec:
+        storage:
+          resources:
+            requests:
+              storage: 60Gi
+          # volumeMode Block pega cache=none + io=native automaticamente:
+          volumeMode: Block
+          # accessModes RWX e' pre-requisito de live migration:
+          accessModes: ["ReadWriteMany"]
+          # storageClassName: <sua-storageclass-de-bloco>
+        source:
+          pvc:
+            namespace: REPLACE_GOLDEN_NS      # ns do seu golden image Windows
+            name: REPLACE_GOLDEN_PVC          # PVC do seu golden image Windows (com virtio-win)
+  template:
+    metadata:
+      labels:
+        app: winperf                          # <- usado pela (anti-)affinity
+        kubevirt.io/domain: winperf-a
+    spec:
+      # resources vazio DE PROPOSITO no baseline (reproduz o overcommit do cliente).
+      # O Experimento 3 adiciona requests.cpu por cima.
+      domain:
+        cpu:
+          sockets: 1
+          cores: 4                            # <- ajuste ao node (lab) ou 16 (cliente). NAO use dedicatedCpuPlacement.
+          threads: 1
+          model: host-model                   # correto e migration-safe. NAO use host-passthrough.
+        memory:
+          guest: 8Gi                           # <- 8Gi no lab, 96Gi no cliente
+        resources: {}
+        ioThreadsPolicy: auto
+        clock:
+          timezone: UTC
+          utc: {}
+          timer:
+            hpet: { present: false }
+            pit:  { tickPolicy: delay }
+            rtc:  { tickPolicy: catchup }
+            hyperv: {}
+        features:
+          acpi: {}
+          apic: {}
+          hyperv:
+            relaxed: {}
+            vapic: {}
+            vpindex: {}
+            synic: {}
+            synictimer: { direct: {} }
+            spinlocks: { spinlocks: 8191 }
+            tlbflush: {}
+            ipi: {}
+            runtime: {}
+            reset: {}
+            frequencies: {}
+            reenlightenment: {}
+        devices:
+          disks:
+            - name: root
+              bootOrder: 1
+              disk: { bus: virtio }
+          interfaces:
+            - name: default
+              model: virtio
+              masquerade: {}                   # rede de pod; troque por bridge/multus se precisar do L2 do cliente
+          tpm: { enabled: false }
+        # firmware:                            # descomente e ajuste ao golden image:
+        #   bootloader: { bios: {} }           # BIOS  ... ou ...
+        #   bootloader: { efi: { secureBoot: false } }  # UEFI
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: root
+          dataVolume:
+            name: winperf-a-root
