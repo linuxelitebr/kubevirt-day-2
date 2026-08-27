@@ -2,8 +2,6 @@
 
 Kit reprodutível para provar, com número, **onde** está a lentidão de uma app IIS numa VM migrada, sem usar nada que quebre live migration (nada de CPU pinning, dedicated CPUs ou host-passthrough).
 
-> ⚠️ **De-identificação**: este kit é neutro. Se virar post, scrub qualquer coisa do cliente que entrar nos resultados (IP, nome de node/namespace, MAC, serial, EPG/rede como `ric-*`).
-
 ---
 
 ## A hipótese (o modelo a refutar)
@@ -52,7 +50,7 @@ A queixa era "a primeira resposta da URL passou de 3s pra 5s depois de migrar". 
 
 Regra de ouro em todos: **um reboot = uma variável**; mesmo node (a não ser Exp 2), guest quiesced (Windows Update/Defender/tarefas OFF), **>= 6 rodadas, descarta a run 1**, reporta **mediana + IQR**.
 
-### Exp 1 — CPU model: host-passthrough vs host-model
+### Exp 1: CPU model: host-passthrough vs host-model
 Mede se passthrough compra algo (esperado: não) e o que faz com a migração (esperado: vira risco).
 ```bash
 # estado do cliente (arriscado):
@@ -69,7 +67,7 @@ virtctl restart winperf-a -n <ns>
 ```
 **Predição:** TTFB/CPU empatam; passthrough só migra entre CPUs idênticas (num cluster heterogêneo, quebra).
 
-### Exp 2 — Contenção: 2 VMs co-locadas vs separadas (o achado principal)
+### Exp 2: Contenção: 2 VMs co-locadas vs separadas (o achado principal)
 ```bash
 # ARM A (contendido): fixe as duas no MESMO node
 oc patch vm winperf-a -n <ns> --type merge -p '{"spec":{"template":{"spec":{"nodeSelector":{"kubernetes.io/hostname":"<node1>"}}}}}'
@@ -89,7 +87,7 @@ oc patch vm winperf-a -n <ns> --type merge -p '{"spec":{"template":{"spec":{"aff
 ```
 **Predição:** co-locadas + rajada simultânea = +2s no TTFB; separadas = volta ao piso. É a reprodução do teste do cliente.
 
-### Exp 3 — Overcommit: `resources: {}` vs `requests.cpu`
+### Exp 3: Overcommit: `resources: {}` vs `requests.cpu`
 ```bash
 # reserva cores de verdade (N = cores da VM); o scheduler para de empilhar as duas
 oc patch vm winperf-a -n <ns> --type merge -p '{"spec":{"template":{"spec":{"domain":{"resources":{"requests":{"cpu":"4"}}}}}}}'
@@ -99,7 +97,7 @@ oc get vmi -n <ns> -o custom-columns=NAME:.metadata.name,NODE:.status.nodeName  
 ```
 **Predição:** com requests reais, as duas não cabem no mesmo node (ou não disputam), e o +2s some sem precisar de anti-affinity explícita. Mostra que a causa era o `resources: {}`.
 
-### Exp 4 — Warm-up de IIS: o piso de 3s
+### Exp 4: Warm-up de IIS: o piso de 3s
 ```powershell
 # dentro da VM:
 .\scripts\setup-iis.ps1 -Warmup on     # AlwaysRunning + preload + idle timeout 0
