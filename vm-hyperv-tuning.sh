@@ -659,7 +659,11 @@ do_undo() {
 
 CMD="${1:-}"
 case "$CMD" in
+  audit|apply|status|undo) ;;
   -h|--help|help|"") usage; exit 0 ;;
+  *) echo "ERRO: comando invalido ou ausente: '$CMD'." >&2
+     echo "Use um comando: audit | apply | status | undo   (veja '$0 -h')." >&2
+     exit 2 ;;
 esac
 shift
 
