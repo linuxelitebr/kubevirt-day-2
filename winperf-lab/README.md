@@ -1,4 +1,4 @@
-# winperf-lab — medir performance de VM Windows/IIS migrada no OpenShift Virtualization
+# winperf-lab: medir performance de VM Windows/IIS migrada no OpenShift Virtualization
 
 Kit reprodutível para provar, com número, **onde** está a lentidão de uma app IIS numa VM migrada, sem usar nada que quebre live migration (nada de CPU pinning, dedicated CPUs ou host-passthrough).
 
