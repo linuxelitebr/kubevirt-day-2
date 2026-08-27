@@ -31,6 +31,32 @@ A queixa era "a primeira resposta da URL passou de 3s pra 5s depois de migrar". 
 
 ---
 
+## Como rodar os scripts PowerShell (leia se você não manja de PowerShell)
+
+**Duplo-clique num arquivo `.ps1` NÃO executa, abre no Notepad.** É trava de segurança do Windows: script PowerShell só roda quando você o chama de dentro do PowerShell. Faça assim, uma vez em cada VM:
+
+1. **Abra o PowerShell como Administrador.** Menu Iniciar → digite `PowerShell` → clique com o botão direito em "Windows PowerShell" → **Executar como administrador**. (Precisa de admin porque o setup instala funções do IIS.)
+2. **Vá até a pasta do kit** (onde estão as pastas `app` e `scripts`). Exemplo:
+   ```powershell
+   cd C:\winperf-lab
+   ```
+3. **Libere a execução só nesta janela e rode.** O `Set-ExecutionPolicy ... Process` vale só pra essa sessão, não muda nada permanente na máquina:
+   ```powershell
+   Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+   .\scripts\setup-iis.ps1 -AppSource .\app -Warmup off
+   ```
+
+**Se aparecer o erro "não está assinado digitalmente":** os arquivos vieram marcados como "baixados da internet". Limpe a marca e rode de novo:
+```powershell
+Get-ChildItem -Recurse . | Unblock-File
+```
+
+**Dica de caminho:** os comandos assumem que você está na **raiz do `winperf-lab`** (por isso `.\scripts\setup-iis.ps1` e `-AppSource .\app`). Se você entrou dentro da pasta `scripts\`, use `.\setup-iis.ps1 -AppSource ..\app`.
+
+**Regra geral para qualquer `.ps1` deste kit:** sempre numa janela PowerShell **Administrador**, com o `Set-ExecutionPolicy ... Bypass` já feito naquela sessão, e chamando com `.\` na frente (ex.: `.\scripts\measure-ttfb.ps1 ...`). Se rodar sem ser admin, o `setup-iis.ps1` avisa e para (ele exige elevação).
+
+---
+
 ## Setup (uma vez)
 
 1. Crie 2 VMs a partir de `vms/vm-app.yaml` (uma `winperf-a`, outra `winperf-b`; ajuste `source.pvc`, `cores`, `memory`, firmware). As duas com `labels.app: winperf`.

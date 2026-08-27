@@ -1,3 +1,4 @@
+#Requires -RunAsAdministrator
 <#
   setup-iis.ps1  - instala IIS + ASP.NET 4.x + App Init, publica a app, e liga/desliga o warm-up.
   Rode como Administrador dentro da VM Windows.
