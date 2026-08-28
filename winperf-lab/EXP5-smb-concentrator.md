@@ -40,32 +40,38 @@ O que esse share **não** reproduz, e como tratamos:
 
 Ajustes opcionais pra ficar mais fiel: se o NAS real serve single-stream, desligue o multichannel no cliente (`Set-SmbClientConfiguration -EnableMultiChannel $false`) pra não ganhar um paralelismo que a produção não tem. O dialeto não precisa forçar: Windows Server moderno negocia 3.1.1 sozinho.
 
+## Cuidado com o cache (por que `-Cold`)
+
+O cliente SMB do Windows cacheia conteúdo e handles. Sem cuidado, **só a primeira passada bate na rede**; as seguintes são servidas da RAM (mediana ~0,08 ms, que **não é rede**). Sintoma real observado num run: run 1 `stat` 2,3 ms / `read` 3,3 ms (rede, ~1,16 MB/s, a assinatura do SMB chatty), e runs 2-6 despencando pra 0,085 ms (cache).
+
+Por isso o `-Cold`: cada rodada lê um **lote disjunto de arquivos nunca lidos**, então toda rodada é fria e bate no fio. **Neste experimento, NÃO se descarta a run 1** (ao contrário dos experimentos de CPU). Use sempre caminho **UNC** (`\\server\share`), não letra mapeada, pra garantir o mesmo endpoint nas duas plataformas.
+
 ## Como rodar
 
-Preparar a corpus uma vez (grava no NAS de qualquer lugar):
+Preparar a corpus uma vez em modo cold (grava no share; precisa de `Files*Runs` arquivos):
 
 ```powershell
-.\scripts\bench-smb.ps1 -Share \\<nas>\<share>\winperf-bench -Prepare -Files 800 -SizeKB 8
+.\scripts\bench-smb.ps1 -Share \\<server>\<share>\winperf-bench -Prepare -Cold -Files 800 -Runs 6 -SizeKB 8
 ```
 
-Medir com a VM no VMware, depois migrar a MESMA VM pro OpenShift e repetir (mesma janela de horário):
+Medir a MESMA VM em cada plataforma (mesma janela de horário), sempre `-Cold` e UNC:
 
 ```powershell
-.\scripts\bench-smb.ps1 -Share \\<nas>\<share>\winperf-bench -Stage vmware    -Runs 6 -Out smb.csv
+.\scripts\bench-smb.ps1 -Share \\<server>\<share>\winperf-bench -Cold -Stage vmware    -Runs 6 -Out smb.csv
 .\scripts\capture-net-path.ps1 -Share \\<dfs>\<namespace>\<app> -Out netpath-vmware.txt
-# migrar a VM para o OpenShift, mesma janela:
-.\scripts\bench-smb.ps1 -Share \\<nas>\<share>\winperf-bench -Stage openshift -Runs 6 -Out smb.csv
+# migrar (ou usar a VM gêmea) no OpenShift, mesma janela:
+.\scripts\bench-smb.ps1 -Share \\<server>\<share>\winperf-bench -Cold -Stage openshift -Runs 6 -Out smb.csv
 .\scripts\capture-net-path.ps1 -Share \\<dfs>\<namespace>\<app> -Out netpath-openshift.txt
 ```
 
 Custo do signing (o ambiente do cliente exige; medir os dois pra dimensionar a parcela dele):
 
 ```powershell
-.\scripts\bench-smb.ps1 -Share \\<nas>\<share>\winperf-bench -Stage openshift-sign   -Signing on  -Runs 6 -Out smb.csv
-.\scripts\bench-smb.ps1 -Share \\<nas>\<share>\winperf-bench -Stage openshift-nosign -Signing off -Runs 6 -Out smb.csv
+.\scripts\bench-smb.ps1 -Share \\<server>\<share>\winperf-bench -Cold -Stage openshift-sign   -Signing on  -Runs 6 -Out smb.csv
+.\scripts\bench-smb.ps1 -Share \\<server>\<share>\winperf-bench -Cold -Stage openshift-nosign -Signing off -Runs 6 -Out smb.csv
 ```
 
-Regra de ouro do kit: **>= 6 rodadas, descarta a run 1, compara mediana + p95** (não média — uma média deixa um outlier mandar).
+Regra de ouro: **>= 6 rodadas cold, compara mediana + p95** (não média — uma média deixa um outlier mandar). Em `-Cold` todas as rodadas são de rede, então nenhuma se descarta.
 
 ## O que confirma / o que refuta a tese
 
