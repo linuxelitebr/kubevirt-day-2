@@ -63,9 +63,16 @@ if ($Prepare) {
 if ($Signing -ne 'leave') {
   $req = ($Signing -eq 'on')
   Write-Host ("Set-SmbClientConfiguration RequireSecuritySignature = {0} (vale so' pra conexoes NOVAS)" -f $req) -ForegroundColor Yellow
-  Set-SmbClientConfiguration -RequireSecuritySignature $req -Force
-  cmd /c "net use $Share /delete /y" 2>$null | Out-Null
+  try { Set-SmbClientConfiguration -RequireSecuritySignature $req -Force }
+  catch { Write-Host ("  aviso: nao mudou o signing (" + $_.Exception.Message + "); precisa de Admin.") -ForegroundColor Yellow }
+  # Best-effort: derruba conexoes com o SERVIDOR (nao o subcaminho X:\tmp\...) pra forcar renegociacao. Nunca aborta.
+  $srv = $null
+  if ($Share -match '^([A-Za-z]:)') {
+    try { $rp = (Get-SmbMapping -LocalPath $matches[1] -ErrorAction SilentlyContinue).RemotePath; if ($rp -match '^\\\\([^\\]+)\\') { $srv = $matches[1] } } catch {}
+  } elseif ($Share -match '^\\\\([^\\]+)\\') { $srv = $matches[1] }
+  if ($srv) { try { cmd /c "net use \\$srv /delete /y" 2>&1 | Out-Null } catch {} }
   Start-Sleep -Seconds 1
+  if ($req) { Write-Host "  nota: se o servidor EXIGE signing, a conexao ja vem assinada mesmo sem este passo." -ForegroundColor DarkGray }
 }
 
 if (-not (Test-Path $corpus)) { throw "Corpus nao encontrado em $corpus. Rode com -Prepare primeiro." }
