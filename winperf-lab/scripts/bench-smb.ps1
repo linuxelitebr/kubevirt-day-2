@@ -90,10 +90,19 @@ function Pct([double[]]$vals,[double]$p) {
 
 $mode = if ($Cold) { 'cold' } else { 'warm' }
 for ($r = 1; $r -le $Runs; $r++) {
-  # COLD: lote DISJUNTO de arquivos nunca lidos -> sempre frio, sempre no fio.
+  # COLD: lote DISJUNTO por rodada, dividido em DOIS pra 'stat' e 'read' NUNCA tocarem o mesmo
+  # arquivo (senao o 'stat' abre cada arquivo primeiro e AQUECE o 'read', mascarando a leitura).
   # warm: sempre os mesmos Files primeiros arquivos -> run 1 frio, resto do cache.
-  if ($Cold) { $slice = $all[(($r-1)*$Files)..(($r*$Files)-1)] } else { $slice = $all[0..($Files-1)] }
+  if ($Cold) {
+    $runSlice = $all[(($r-1)*$Files)..(($r*$Files)-1)]
+    $half = [int]($Files/2)
+    $sliceOf = @{ stat = $runSlice[0..($half-1)]; read = $runSlice[$half..($Files-1)] }
+  } else {
+    $warm = $all[0..($Files-1)]
+    $sliceOf = @{ stat = $warm; read = $warm }
+  }
   foreach ($op in @('stat','read')) {
+    $slice = $sliceOf[$op]
     $lat = New-Object System.Collections.Generic.List[double]
     $bytes = [long]0
     $swAll = [System.Diagnostics.Stopwatch]::StartNew()
