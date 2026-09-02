@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demo Farm - IIS content-on-NAS</title>
+<style>
+  :root{--bg:#0f1115;--panel:#171a21;--line:#2a2f3a;--fg:#e7ebf0;--mut:#9aa4b2;
+        --io:#e5484d;--cpu:#3b82f6;--wire:#f5a524;--ok:#30a46c}
+  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);
+    font:14px/1.45 -apple-system,Segoe UI,Roboto,sans-serif}
+  header{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;gap:16px;
+    align-items:center;flex-wrap:wrap}
+  h1{font-size:16px;margin:0;font-weight:600} .mut{color:var(--mut)}
+  main{padding:18px;display:grid;gap:18px;max-width:1100px;margin:0 auto}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .panel h2{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);margin:0 0 12px}
+  table{width:100%;border-collapse:collapse} th,td{text-align:right;padding:5px 8px;
+    border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums} th{color:var(--mut);font-weight:500}
+  td.l,th.l{text-align:left}
+  .bar{height:16px;border-radius:3px;background:#222834;overflow:hidden;display:flex;min-width:60px}
+  .bar>i{display:block;height:100%} .bar>i.io{background:var(--io)} .bar>i.cpu{background:var(--cpu)}
+  select,button{background:#222834;color:var(--fg);border:1px solid var(--line);border-radius:7px;
+    padding:7px 11px;font:inherit} button{cursor:pointer} button.primary{background:var(--ok);border-color:var(--ok);color:#03130b;font-weight:600}
+  button:hover{border-color:#4b566b}
+  .cmp{display:grid;grid-template-columns:180px 1fr 90px;gap:8px 12px;align-items:center}
+  .cmp .track{background:#222834;border-radius:4px;height:26px;overflow:hidden}
+  .cmp .track>i{display:block;height:100%;background:linear-gradient(90deg,#e5484d,#f5a524)}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;color:var(--mut);font-size:12px}
+  .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle}
+  .big{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Demo Farm <span class="mut">IIS content-on-NAS</span></h1>
+  <span class="mut" id="cfg"></span>
+  <span style="flex:1"></span>
+  <span class="legend">
+    <span><span class="sw" style="background:var(--io)"></span>io_ms (NAS)</span>
+    <span><span class="sw" style="background:var(--cpu)"></span>compute_ms</span>
+    <span><span class="sw" style="background:var(--wire)"></span>rede KB (compressão)</span>
+  </span>
+</header>
+<main>
+  <section class="panel">
+    <h2>Agora (mediana das sites)</h2>
+    <div class="grid3">
+      <div><div class="mut">total</div><div class="big"><span id="mTot">-</span> <span class="mut" style="font-size:14px">ms</span></div></div>
+      <div><div class="mut">io (leitura da raiz)</div><div class="big" style="color:var(--io)"><span id="mIo">-</span> <span class="mut" style="font-size:14px">ms</span></div></div>
+      <div><div class="mut">tamanho na rede</div><div class="big" style="color:var(--wire)"><span id="mWire">-</span> <span class="mut" style="font-size:14px">KB</span></div></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Capturar cenário 2×2</h2>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <span class="mut">Cenário atual:</span>
+      <select id="slot">
+        <option value="nas_nocomp">NAS · sem compressão</option>
+        <option value="nas_comp">NAS · com compressão</option>
+        <option value="local_nocomp">Local · sem compressão</option>
+        <option value="local_comp">Local · com compressão</option>
+      </select>
+      <button class="primary" id="cap">Capturar cenário atual</button>
+      <button id="reset">Limpar capturas</button>
+      <span class="mut" id="capMsg"></span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Comparativo dos 4 cenários</h2>
+    <div style="margin-bottom:10px">
+      <label class="mut">métrica:</label>
+      <select id="metric">
+        <option value="tot">total_ms</option>
+        <option value="io">io_ms (NAS)</option>
+        <option value="wire">tamanho na rede (KB)</option>
+      </select>
+    </div>
+    <div class="cmp" id="cmp"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Sites ao vivo</h2>
+    <table>
+      <thead><tr><th class="l">site</th><th>total_ms</th><th style="width:38%">barra (io+compute)</th><th>io_ms</th><th>compute_ms</th><th>rede KB</th><th>http</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </section>
+</main>
+<script>
+(function(){
+  var q = new URLSearchParams(location.search);
+  var host = q.get('host') || location.hostname || 'localhost';
+  var base = parseInt(q.get('base')||'9000',10);
+  var sites = parseInt(q.get('sites')||'8',10);
+  var interval = parseFloat(q.get('interval')||'2')*1000;
+  document.getElementById('cfg').textContent = host+' :'+(base+1)+'..'+(base+sites)+'  ('+sites+' sites, '+(interval/1000)+'s)';
+
+  var urls=[]; for(var i=1;i<=sites;i++) urls.push({name:'demo'+i, url:'http://'+host+':'+(base+i)+'/Default.aspx'});
+  var win = {}; urls.forEach(function(s){ win[s.name]=[]; });      // janela de amostras por site
+  var W = 8;                                                        // tamanho da janela
+  var SLOTS = ['nas_nocomp','nas_comp','local_nocomp','local_comp'];
+  var LABELS = {nas_nocomp:'NAS · sem compressão',nas_comp:'NAS · com compressão',local_nocomp:'Local · sem compressão',local_comp:'Local · com compressão'};
+  var caps = load();
+
+  function load(){ try{ return JSON.parse(localStorage.getItem('demofarm_caps')||'{}'); }catch(e){ return {}; } }
+  function save(){ try{ localStorage.setItem('demofarm_caps', JSON.stringify(caps)); }catch(e){} }
+  function med(a){ if(!a.length) return null; var b=a.slice().sort(function(x,y){return x-y}); return b[Math.floor(b.length/2)]; }
+  function push(name,s){ var w=win[name]; w.push(s); if(w.length>W) w.shift(); }
+  function curMed(field){ var vals=[]; for(var n in win){ var m=med(win[n].map(function(s){return s[field]})); if(m!=null) vals.push(m);} return med(vals); }
+
+  async function hitOne(s){
+    var t0=performance.now(); var http=0, io=null, cpu=null, wire=null;
+    try{
+      var r=await fetch(s.url,{cache:'no-store'}); http=r.status;
+      var j=await r.json(); io=parseFloat(j.io_ms); cpu=parseFloat(j.compute_ms);
+      var ent=performance.getEntriesByName(s.url); var e=ent[ent.length-1];
+      if(e && e.encodedBodySize) wire=e.encodedBodySize/1024;
+    }catch(e){ http=-1; }
+    var tot=performance.now()-t0;
+    return {name:s.name, tot:tot, io:io, cpu:cpu, wire:wire, http:http};
+  }
+
+  function fmt(x,d){ return x==null?'-':x.toFixed(d==null?1:d); }
+
+  function renderRows(samples){
+    var maxTot=Math.max.apply(null,samples.map(function(s){return s.tot||0}).concat([1]));
+    var html=samples.map(function(s){
+      var ioP=s.io!=null?Math.min(100,100*s.io/maxTot):0;
+      var cpuP=s.cpu!=null?Math.min(100-ioP,100*s.cpu/maxTot):0;
+      return '<tr><td class="l">'+s.name+'</td><td>'+fmt(s.tot)+'</td>'+
+        '<td><div class="bar"><i class="io" style="width:'+ioP+'%"></i><i class="cpu" style="width:'+cpuP+'%"></i></div></td>'+
+        '<td style="color:var(--io)">'+fmt(s.io)+'</td><td>'+fmt(s.cpu)+'</td>'+
+        '<td style="color:var(--wire)">'+fmt(s.wire)+'</td>'+
+        '<td style="color:'+(s.http===200?'var(--ok)':'var(--io)')+'">'+s.http+'</td></tr>';
+    }).join('');
+    document.getElementById('rows').innerHTML=html;
+  }
+
+  function renderAgg(){
+    document.getElementById('mTot').textContent=fmt(curMed('tot'));
+    document.getElementById('mIo').textContent=fmt(curMed('io'));
+    document.getElementById('mWire').textContent=fmt(curMed('wire'));
+  }
+
+  function renderCmp(){
+    var metric=document.getElementById('metric').value;
+    var field=metric==='io'?'io':metric==='wire'?'wire':'tot';
+    var unit=metric==='wire'?' KB':' ms';
+    var vals=SLOTS.map(function(k){ return caps[k]?caps[k][field]:null; });
+    var max=Math.max.apply(null,vals.map(function(v){return v||0}).concat([1]));
+    var html=SLOTS.map(function(k,idx){
+      var v=vals[idx]; var w=v!=null?Math.max(2,100*v/max):0;
+      return '<div class="mut" style="text-align:left">'+LABELS[k]+'</div>'+
+        '<div class="track"><i style="width:'+w+'%"></i></div>'+
+        '<div style="text-align:right">'+(v!=null?v.toFixed(field==='wire'?0:1)+unit:'<span class="mut">-</span>')+'</div>';
+    }).join('');
+    document.getElementById('cmp').innerHTML=html;
+  }
+
+  async function cycle(){
+    var samples=await Promise.all(urls.map(hitOne));
+    samples.forEach(function(s){ push(s.name,s); });
+    renderRows(samples); renderAgg();
+    if(performance.getEntriesByType('resource').length>400) performance.clearResourceTimings();
+  }
+
+  document.getElementById('cap').onclick=function(){
+    var k=document.getElementById('slot').value;
+    caps[k]={tot:curMed('tot'),io:curMed('io'),wire:curMed('wire'),ts:new Date().toISOString()};
+    save(); renderCmp();
+    document.getElementById('capMsg').textContent='capturado: '+LABELS[k]+' (total '+fmt(caps[k].tot)+' ms, io '+fmt(caps[k].io)+' ms, rede '+fmt(caps[k].wire,0)+' KB)';
+  };
+  document.getElementById('reset').onclick=function(){ caps={}; save(); renderCmp(); document.getElementById('capMsg').textContent='capturas limpas'; };
+  document.getElementById('metric').onchange=renderCmp;
+
+  renderCmp();
+  cycle(); setInterval(cycle, interval);
+})();
+</script>
+</body>
+</html>

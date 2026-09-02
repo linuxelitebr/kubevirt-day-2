@@ -81,6 +81,19 @@ for ($i = 1; $i -le $Sites; $i++) {
   Write-Host ("  {0}  porta {1}  -> {2}" -f $name,$port,$physical)
 }
 
+# Site do dashboard: serve o dashboard.html numa origem HTTP (evita o bloqueio de fetch de file://)
+# na porta base. O CORS/Timing-Allow-Origin no Default.aspx deixa ele ler as outras portas.
+$dashDir = Join-Path $ContentLocal '_dash'
+New-Item -ItemType Directory -Path $dashDir -Force | Out-Null
+Copy-Item (Join-Path $AppSource 'dashboard.html') $dashDir -Force
+$dashName = "$Prefix-dash"
+if (Test-Path ("IIS:\AppPools\$dashName")) { Remove-WebAppPool -Name $dashName }
+New-WebAppPool -Name $dashName | Out-Null
+if (Test-Path ("IIS:\Sites\$dashName")) { Remove-Website -Name $dashName }
+New-Website -Name $dashName -Port $BasePort -PhysicalPath $dashDir -ApplicationPool $dashName | Out-Null
+Write-Host ("  {0}  porta {1}  -> {2} (dashboard)" -f $dashName,$BasePort,$dashDir)
+
 Write-Host ("Farm no ar: {0} sites, backing={1}, portas {2}..{3}." -f $Sites,$Backing,($BasePort+1),($BasePort+$Sites)) -ForegroundColor Cyan
-Write-Host ("Teste 1 site:  curl http://localhost:{0}/Default.aspx   (olhe io_ms vs compute_ms)" -f ($BasePort+1)) -ForegroundColor Cyan
-Write-Host ("Vira NAS<->local ao vivo:  .\toggle-root.ps1 -Backing local -ContentUnc '{0}' -ContentLocal '{1}'" -f $ContentUnc,$ContentLocal) -ForegroundColor Cyan
+Write-Host ("DASHBOARD:  http://localhost:{0}/dashboard.html?base={0}&sites={1}" -f $BasePort,$Sites) -ForegroundColor Green
+Write-Host ("Vira NAS<->local:  .\toggle-root.ps1 -Backing local -ContentUnc '{0}' -ContentLocal '{1}'" -f $ContentUnc,$ContentLocal) -ForegroundColor Cyan
+Write-Host ("Liga/desliga compressao:  .\toggle-compression.ps1 -State on|off") -ForegroundColor Cyan

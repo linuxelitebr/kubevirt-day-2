@@ -18,8 +18,8 @@ $ErrorActionPreference = 'Stop'
 Import-Module WebAdministration
 
 $root = if ($Backing -eq 'nas') { $ContentUnc } else { $ContentLocal }
-$sites = @(Get-Website | Where-Object { $_.Name -like "$Prefix*" })
-if ($sites.Count -eq 0) { throw "Nenhuma site '$Prefix*' encontrada. Rode setup-demo-farm.ps1 primeiro." }
+$sites = @(Get-Website | Where-Object { $_.Name -match "^$Prefix\d+$" })
+if ($sites.Count -eq 0) { throw "Nenhuma site '$Prefix<n>' encontrada. Rode setup-demo-farm.ps1 primeiro." }
 
 foreach ($s in $sites) {
   $target = Join-Path $root $s.Name
