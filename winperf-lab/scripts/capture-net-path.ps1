@@ -24,6 +24,19 @@ param(
 $ErrorActionPreference = 'Continue'
 $lines = New-Object System.Collections.Generic.List[string]
 function Log($s){ $t = [string]$s; $lines.Add($t) | Out-Null; Write-Host $t }
+function TcpRttMs($server,[int]$port=445,[int]$tries=5){
+  # RTT via handshake TCP (SYN/SYN-ACK) na 445: funciona SEM admin e SEM depender de ICMP.
+  $best = $null
+  for ($i=0; $i -lt $tries; $i++){
+    $c = New-Object System.Net.Sockets.TcpClient
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+      $iar = $c.BeginConnect($server,$port,$null,$null)
+      if ($iar.AsyncWaitHandle.WaitOne(2000)){ $c.EndConnect($iar); $sw.Stop(); $ms=$sw.Elapsed.TotalMilliseconds; if ($null -eq $best -or $ms -lt $best){ $best=$ms } }
+    } catch {} finally { $c.Close() }
+  }
+  if ($null -ne $best){ return [Math]::Round($best,3) } else { return $null }
+}
 
 Log ("===== capture-net-path  " + (Get-Date -Format o) + " =====")
 Log ("Share alvo: " + $Share)
@@ -77,21 +90,26 @@ if (Get-Command dfsutil.exe -ErrorAction SilentlyContinue) {
   Pop-Location
 } else { Log "  dfsutil ausente (RSAT DFS Mgmt nao instalado). O ServerName do passo 3 ja da a replica." }
 
-# 6) Monta a lista de file servers: da conexao SMB, dos mapeamentos, e do proprio -Share se for UNC
+# 6) Descobre o file server ALVO (o que serve o -Share). Se -Share for letra (X:\...), resolve a
+#    letra via Get-SmbMapping; se for UNC, extrai o host. Soma os do Get-SmbConnection (se admin).
 $servers = New-Object System.Collections.Generic.List[string]
+$primary = $null
+if ($Share -match '^([A-Za-z]:)') {
+  $drv = $matches[1]
+  try { $rp = (Get-SmbMapping -LocalPath $drv -ErrorAction Stop).RemotePath; if ($rp -match '^\\\\([^\\]+)\\') { $primary = $matches[1] } } catch {}
+} elseif ($Share -match '^\\\\([^\\]+)\\') { $primary = $matches[1] }
+if ($primary) { $servers.Add($primary) | Out-Null }
 foreach ($c in $conns) { if ($c.ServerName) { $servers.Add([string]$c.ServerName) | Out-Null } }
-foreach ($m in $maps) { if ($m.RemotePath -match '^\\\\([^\\]+)\\') { $servers.Add($matches[1]) | Out-Null } }
-if ($Share -match '^\\\\([^\\]+)\\') { $servers.Add($matches[1]) | Out-Null }
 $servers = @($servers | Where-Object { $_ } | Select-Object -Unique)
 
-# 7) Distancia (RTT) e PMTU efetivo ate cada file server
-Log "`n--- RTT e PMTU efetivo ate os file servers da sessao ---"
-if ($servers.Count -eq 0) { Log "  Nenhum servidor identificado (rode como Admin, ou passe -Share em UNC)." }
+# 7) RTT (handshake TCP na 445, sem admin e sem ICMP) e PMTU efetivo ate o file server
+Log "`n--- RTT (TCP 445) e PMTU efetivo ate o file server ---"
+if ($primary) { Log ("File server que serve o -Share: " + $primary) }
+if ($servers.Count -eq 0) { Log "  Nenhum servidor identificado (passe -Share em UNC, ou rode como Admin)." }
 foreach ($srv in $servers) {
-  Log ("Servidor: " + $srv)
-  $tnc = Test-NetConnection -ComputerName $srv -Port 445 -WarningAction SilentlyContinue
-  $rtt = if ($tnc -and $tnc.PingReplyDetails) { $tnc.PingReplyDetails.RoundtripTime } else { 'n/d' }
-  Log ("  TCP 445: " + $tnc.TcpTestSucceeded + "   RTT(ping ms): " + $rtt)
+  $rtt = TcpRttMs $srv 445 5
+  $rttTxt = if ($null -ne $rtt) { "$rtt ms (min de 5 handshakes TCP)" } else { "n/d (445 nao respondeu)" }
+  Log ("Servidor: " + $srv + "   RTT: " + $rttTxt)
   # PMTU efetivo: maior payload que passa com DF setado. 1472 + 28 = 1500. Guest 1500 nao prova
   # o PMTU efetivo: sob encap geneve o caminho pode ficar ~58 bytes menor.
   $mtu = 0
