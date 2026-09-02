@@ -53,6 +53,10 @@ Log "`n--- Identidade de rede da VM ---"
 Log ((Get-NetIPAddress -AddressFamily IPv4 |
       Where-Object { $_.IPAddress -notlike '169.*' -and $_.IPAddress -ne '127.0.0.1' } |
       Select-Object IPAddress,PrefixLength,InterfaceAlias | Format-Table -Auto | Out-String).Trim())
+Log "MTU das interfaces (NlMtu) - se a VM esta em jumbo (>1500) e o NAS/caminho e 1500, e' mismatch:"
+Log ((Get-NetIPInterface -AddressFamily IPv4 |
+      Where-Object { $_.ConnectionState -eq 'Connected' } |
+      Select-Object InterfaceAlias, NlMtu | Format-Table -Auto | Out-String).Trim())
 Log "AD site desta VM (nltest /dsgetsite):"
 try { Log ((nltest /dsgetsite 2>&1 | Out-String).Trim()) } catch { Log "  (nltest indisponivel)" }
 
