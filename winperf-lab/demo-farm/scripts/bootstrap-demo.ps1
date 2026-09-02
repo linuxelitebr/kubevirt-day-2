@@ -34,7 +34,7 @@ if (-not $SkipIisInstall) {
   } else {
     # Windows client
     $feats = 'IIS-WebServerRole','IIS-WebServer','IIS-ASPNET45','IIS-NetFxExtensibility45','IIS-ApplicationInit','IIS-HttpCompressionDynamic','IIS-HttpCompressionStatic','IIS-ManagementScriptingTools'
-    foreach ($f in $feats) { try { Enable-WindowsOptionalFeature -Online -FeatureName $f -All -NoRestart -ErrorAction Stop | Out-Null } catch { Write-Host "  ($f: $($_.Exception.Message))" -ForegroundColor DarkGray } }
+    foreach ($f in $feats) { try { Enable-WindowsOptionalFeature -Online -FeatureName $f -All -NoRestart -ErrorAction Stop | Out-Null } catch { Write-Host ("  ({0}: {1})" -f $f,$_.Exception.Message) -ForegroundColor DarkGray } }
   }
 }
 
