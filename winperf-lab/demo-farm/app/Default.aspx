@@ -47,6 +47,8 @@
           .Append(",\"runtime\":\".NET CLR ").Append(Environment.Version).Append("\"")
           .Append(",\"worker\":\"").Append(System.Diagnostics.Process.GetCurrentProcess().ProcessName).Append("\"")
           .Append(",\"bits\":\"").Append(Environment.Is64BitProcess ? "x64" : "x86").Append("\"")
+          .Append(",\"heap_mb\":").Append(GC.GetTotalMemory(false) / 1048576)
+          .Append(",\"ws_mb\":").Append(System.Diagnostics.Process.GetCurrentProcess().WorkingSet64 / 1048576)
           .Append(",\"filler\":\"").Append(filler).Append("\"}");
         Response.Write(sb.ToString());
     }

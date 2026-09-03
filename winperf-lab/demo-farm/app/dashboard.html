@@ -47,6 +47,9 @@
   .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
   .badge{background:#eff6fc;border:1px solid #b3d3ea;color:#005299;border-radius:3px;padding:2px 8px;font-size:12px;font-weight:600;white-space:nowrap}
   .note{color:var(--mut);font-size:12px;margin-top:6px}
+  /* severidade sobria (verde/ambar/vermelho por limiar), estilo Task Manager - nao cartoon */
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;vertical-align:middle;border:1px solid rgba(0,0,0,.12)}
+  .dot.ok{background:var(--ok)} .dot.warn{background:#c98a00} .dot.bad{background:var(--io)}
 </style>
 </head>
 <body>
@@ -115,6 +118,9 @@
   var base = parseInt(q.get('base')||'9000',10);
   var sites = parseInt(q.get('sites')||'8',10);
   var interval = parseFloat(q.get('interval')||'2')*1000;
+  var WARN = parseFloat(q.get('warn')||'150'), SLOW = parseFloat(q.get('slow')||'400');
+  function sevOf(ms){ if(ms==null) return ''; if(ms>=SLOW) return 'bad'; if(ms>=WARN) return 'warn'; return 'ok'; }
+  function sevColor(sv){ return sv==='bad'?'var(--io)':sv==='warn'?'#c98a00':'var(--ok)'; }
   document.getElementById('cfg').textContent = host+' :'+(base+1)+'..'+(base+sites)+'  ('+sites+' sites, '+(interval/1000)+'s)';
 
   var urls=[]; for(var i=1;i<=sites;i++) urls.push({name:'demo'+i, url:'http://'+host+':'+(base+i)+'/Default.aspx'});
@@ -151,7 +157,9 @@
     var html=samples.map(function(s){
       var ioP=s.io!=null?Math.min(100,100*s.io/maxTot):0;
       var cpuP=s.cpu!=null?Math.min(100-ioP,100*s.cpu/maxTot):0;
-      return '<tr><td class="l">'+s.name+'</td><td>'+fmt(s.tot)+'</td>'+
+      var sv=sevOf(s.tot);
+      return '<tr><td class="l"><span class="dot '+sv+'"></span>'+s.name+'</td>'+
+        '<td style="color:'+sevColor(sv)+';font-weight:600">'+fmt(s.tot)+'</td>'+
         '<td><div class="bar"><i class="io" style="width:'+ioP+'%"></i><i class="cpu" style="width:'+cpuP+'%"></i></div></td>'+
         '<td style="color:var(--io)">'+fmt(s.io)+'</td><td>'+fmt(s.cpu)+'</td>'+
         '<td style="color:var(--wire)">'+fmt(s.wire)+'</td>'+

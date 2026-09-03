@@ -48,6 +48,7 @@ function Provision($root, $i) {
   New-Item -ItemType Directory -Path $frag -Force | Out-Null
   Copy-Item (Join-Path $AppSource 'Default.aspx') $siteDir -Force
   Copy-Item (Join-Path $AppSource 'web.config')  $siteDir -Force
+  Copy-Item (Join-Path $AppSource 'Global.asax')  $siteDir -Force
   for ($f = 0; $f -lt $Fragments; $f++) {
     [System.IO.File]::WriteAllBytes((Join-Path $frag ("f{0:D4}.frag" -f $f)), $buf)
   }
