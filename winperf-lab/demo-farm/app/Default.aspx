@@ -44,6 +44,9 @@
           .Append(",\"io_ms\":").Append(swIo.Elapsed.TotalMilliseconds.ToString("F1"))
           .Append(",\"compute_ms\":").Append(swCpu.Elapsed.TotalMilliseconds.ToString("F1"))
           .Append(",\"ts\":\"").Append(DateTime.UtcNow.ToString("o")).Append("\"")
+          .Append(",\"runtime\":\".NET CLR ").Append(Environment.Version).Append("\"")
+          .Append(",\"worker\":\"").Append(System.Diagnostics.Process.GetCurrentProcess().ProcessName).Append("\"")
+          .Append(",\"bits\":\"").Append(Environment.Is64BitProcess ? "x64" : "x86").Append("\"")
           .Append(",\"filler\":\"").Append(filler).Append("\"}");
         Response.Write(sb.ToString());
     }

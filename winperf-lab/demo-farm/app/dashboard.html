@@ -5,36 +5,54 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Demo Farm - IIS content-on-NAS</title>
 <style>
-  :root{--bg:#0f1115;--panel:#171a21;--line:#2a2f3a;--fg:#e7ebf0;--mut:#9aa4b2;
-        --io:#e5484d;--cpu:#3b82f6;--wire:#f5a524;--ok:#30a46c}
-  *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--fg);
-    font:14px/1.45 -apple-system,Segoe UI,Roboto,sans-serif}
-  header{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;gap:16px;
+  /* Paleta e tipografia de utilitario nativo do Windows (Task Manager / Resource Monitor / IIS Manager) */
+  :root{
+    --bg:#f3f3f3; --panel:#ffffff; --line:#e5e5e5; --hdr:#fafafa; --fg:#1b1b1b; --mut:#5c5c5c;
+    --io:#c42b1c;   /* vermelho Windows - custo de leitura (NAS) */
+    --cpu:#005fb8;  /* azul de acento Windows - compute */
+    --wire:#8a6d00; /* ambar discreto - tamanho na rede */
+    --ok:#0f7b0f;   /* verde Windows - http 200 */
+    --accent:#005fb8;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:13px/1.4 "Segoe UI Variable","Segoe UI",system-ui,Tahoma,Arial,sans-serif}
+  header{padding:9px 16px;background:#fff;border-bottom:1px solid #d9d9d9;display:flex;gap:14px;
     align-items:center;flex-wrap:wrap}
-  h1{font-size:16px;margin:0;font-weight:600} .mut{color:var(--mut)}
-  main{padding:18px;display:grid;gap:18px;max-width:1100px;margin:0 auto}
-  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
-  .panel h2{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);margin:0 0 12px}
-  table{width:100%;border-collapse:collapse} th,td{text-align:right;padding:5px 8px;
-    border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums} th{color:var(--mut);font-weight:500}
+  h1{font-size:14px;margin:0;font-weight:600}
+  .mut{color:var(--mut)}
+  main{padding:14px;display:grid;gap:12px;max-width:1120px;margin:0 auto}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:11px 14px;
+    box-shadow:0 1px 1px rgba(0,0,0,.03)}
+  .panel h2{font-size:12px;font-weight:600;color:var(--fg);margin:0 0 10px;padding-bottom:6px;
+    border-bottom:1px solid var(--line)}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:right;padding:5px 8px;border-bottom:1px solid #f0f0f0;font-variant-numeric:tabular-nums}
+  th{color:var(--mut);font-weight:600;background:var(--hdr);border-bottom:1px solid var(--line)}
+  tbody tr:hover{background:#f2f7fd}
   td.l,th.l{text-align:left}
-  .bar{height:16px;border-radius:3px;background:#222834;overflow:hidden;display:flex;min-width:60px}
+  .bar{height:14px;border-radius:2px;background:#eaeaea;border:1px solid #dcdcdc;overflow:hidden;display:flex;min-width:60px}
   .bar>i{display:block;height:100%} .bar>i.io{background:var(--io)} .bar>i.cpu{background:var(--cpu)}
-  select,button{background:#222834;color:var(--fg);border:1px solid var(--line);border-radius:7px;
-    padding:7px 11px;font:inherit} button{cursor:pointer} button.primary{background:var(--ok);border-color:var(--ok);color:#03130b;font-weight:600}
-  button:hover{border-color:#4b566b}
-  .cmp{display:grid;grid-template-columns:180px 1fr 90px;gap:8px 12px;align-items:center}
-  .cmp .track{background:#222834;border-radius:4px;height:26px;overflow:hidden}
-  .cmp .track>i{display:block;height:100%;background:linear-gradient(90deg,#e5484d,#f5a524)}
-  .legend{display:flex;gap:16px;flex-wrap:wrap;color:var(--mut);font-size:12px}
-  .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle}
-  .big{font-size:26px;font-weight:700;font-variant-numeric:tabular-nums}
+  select,button{background:#fff;color:var(--fg);border:1px solid #c4c4c4;border-radius:4px;
+    padding:5px 10px;font:inherit;min-height:28px}
+  button{cursor:pointer} button:hover{background:#f5f5f5;border-color:#a3a3a3}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+  button.primary:hover{background:#005299;border-color:#005299}
+  .cmp{display:grid;grid-template-columns:190px 1fr 96px;gap:6px 12px;align-items:center}
+  .cmp .track{background:#eaeaea;border:1px solid #dcdcdc;border-radius:2px;height:24px;overflow:hidden}
+  .cmp .track>i{display:block;height:100%;background:var(--io)}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--mut);font-size:12px}
+  .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle;border:1px solid rgba(0,0,0,.15)}
+  .big{font-size:23px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
   .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  .badge{background:#eff6fc;border:1px solid #b3d3ea;color:#005299;border-radius:3px;padding:2px 8px;font-size:12px;font-weight:600;white-space:nowrap}
+  .note{color:var(--mut);font-size:12px;margin-top:6px}
 </style>
 </head>
 <body>
 <header>
-  <h1>Demo Farm <span class="mut">IIS content-on-NAS</span></h1>
+  <h1>Demo Farm <span class="mut">app ASP.NET (.NET) por site &middot; conteudo no NAS</span></h1>
+  <span class="badge" id="rt">.NET (aguardando)</span>
   <span class="mut" id="cfg"></span>
   <span style="flex:1"></span>
   <span class="legend">
@@ -105,6 +123,7 @@
   var SLOTS = ['nas_nocomp','nas_comp','local_nocomp','local_comp'];
   var LABELS = {nas_nocomp:'NAS · sem compressão',nas_comp:'NAS · com compressão',local_nocomp:'Local · sem compressão',local_comp:'Local · com compressão'};
   var caps = load();
+  var rtSet = false;
 
   function load(){ try{ return JSON.parse(localStorage.getItem('demofarm_caps')||'{}'); }catch(e){ return {}; } }
   function save(){ try{ localStorage.setItem('demofarm_caps', JSON.stringify(caps)); }catch(e){} }
@@ -117,6 +136,7 @@
     try{
       var r=await fetch(s.url,{cache:'no-store'}); http=r.status;
       var j=await r.json(); io=parseFloat(j.io_ms); cpu=parseFloat(j.compute_ms);
+      if(!rtSet && j.runtime){ document.getElementById('rt').textContent='ASP.NET · '+j.runtime+' · '+(j.worker||'w3wp')+'.exe · '+(j.bits||''); rtSet=true; }
       var ent=performance.getEntriesByName(s.url); var e=ent[ent.length-1];
       if(e && e.encodedBodySize) wire=e.encodedBodySize/1024;
     }catch(e){ http=-1; }
