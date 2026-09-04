@@ -9,10 +9,12 @@
   padrao do cliente (35 sites servindo de um concentrador DFS unico). Compressao dinamica off e
   porta propria por site espelham o cliente.
 
-  IDENTIDADE DO APP POOL: pra ler o NAS, o app pool precisa de uma conta com acesso ao share (como
-  no cliente, uma conta de servico de dominio). Passe -PoolCredential (Get-Credential) pra rodar os
-  pools com essa conta; sem isso, os pools usam ApplicationPoolIdentity (a conta de maquina precisa
-  ter acesso ao share).
+  ACESSO AO NAS (Connect As): passe -PoolCredential (Get-Credential) com uma conta que le o share.
+  Ela e' aplicada como credencial de CONTEUDO da site ("Connect As" da vdir), NAO como identidade do
+  pool - assim o pool sobe como ApplicationPoolIdentity (sem exigir "Log on as a batch job", que
+  ambiente endurecido costuma negar) e o IIS le o NAS com a tua conta.
+  IMPORTANTE: use o -ContentUnc em UNC (\\servidor\share\...), NUNCA letra mapeada (X:) - drive
+  mapeado e' por-sessao de logon e o app pool NAO enxerga o X:.
 
   Exemplo:
     $c = Get-Credential DOMINIO\svc_iis
@@ -68,16 +70,15 @@ for ($i = 1; $i -le $Sites; $i++) {
   New-WebAppPool -Name $name | Out-Null
   Set-ItemProperty ("IIS:\AppPools\$name") -Name managedRuntimeVersion -Value 'v4.0'
   Set-ItemProperty ("IIS:\AppPools\$name") -Name managedPipelineMode -Value 'Integrated'
-  if ($PoolCredential) {
-    Set-ItemProperty ("IIS:\AppPools\$name") -Name processModel -Value @{
-      identitytype = 'SpecificUser'
-      userName     = $PoolCredential.UserName
-      password     = $PoolCredential.GetNetworkCredential().Password
-    }
-  }
 
   if (Test-Path ("IIS:\Sites\$name")) { Remove-Website -Name $name }
   New-Website -Name $name -Port $port -PhysicalPath $physical -ApplicationPool $name | Out-Null
+  if ($PoolCredential) {
+    # Connect As: o IIS acessa o conteudo (o NAS via UNC) com esta credencial. O pool fica
+    # ApplicationPoolIdentity (sobe sem "Log on as a batch job"); so' a leitura do conteudo usa a conta.
+    Set-ItemProperty ("IIS:\Sites\$name") -Name userName -Value $PoolCredential.UserName
+    Set-ItemProperty ("IIS:\Sites\$name") -Name password -Value $PoolCredential.GetNetworkCredential().Password
+  }
 
   Write-Host ("  {0}  porta {1}  -> {2}" -f $name,$port,$physical)
 }
