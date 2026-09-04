@@ -4,51 +4,69 @@
 <%@ Import Namespace="System.Configuration" %>
 <%@ Import Namespace="System.Text" %>
 <script runat="server">
-    // Arquetipo "dynamic-reads-root": a cada request le TODOS os fragmentos do content root (o padrao
-    // do cliente: conteudo na raiz servido de UNC/DFS). io_ms = esse custo (muda NAS vs local, e NENHUM
-    // cache do IIS cobre). compute_ms = trabalho local constante (linha de base). O filler comprimivel
-    // deixa a compressao dinamica visivel no TAMANHO de rede (encodedBodySize).
+    // Arquetipo "dynamic-reads-root": le TODOS os fragmentos do content root por request (o padrao do
+    // cliente: conteudo servido de UNC/DFS). io_ms = esse custo (muda NAS vs local; nenhum cache do IIS
+    // cobre I/O de arquivo do app). compute_ms = trabalho local constante. filler = corpo comprimivel.
+    //
+    // BLINDADO: nunca estoura. Qualquer falha (ex.: leitura do NAS negada porque a identidade do pool
+    // nao alcanca o share, ou chamada de trust restrito) e' capturada e vai no campo "err" do JSON, com
+    // os headers de CORS SEMPRE presentes - assim o erro aparece no dashboard em vez de virar 500+CORS.
     void Page_Load(object sender, EventArgs e)
     {
-        // Headers: o dashboard roda em outra porta (outra origem). CORS libera ler o corpo;
-        // Timing-Allow-Origin libera o browser expor o tamanho REAL transferido (pra ver a compressao).
         Response.AppendHeader("Access-Control-Allow-Origin", "*");
         Response.AppendHeader("Timing-Allow-Origin", "*");
         Response.AppendHeader("Cache-Control", "no-store");
-
-        int iters;
-        if (!int.TryParse(ConfigurationManager.AppSettings["ComputeIters"], out iters) || iters <= 0) iters = 2000000;
-        int payloadKB;
-        if (!int.TryParse(ConfigurationManager.AppSettings["PayloadKB"], out payloadKB) || payloadKB < 0) payloadKB = 200;
-
-        // 1) io_ms: le todos os fragmentos da raiz (open+read+close por arquivo = chatty). NAS vs local aparece aqui.
-        string dir = Server.MapPath("~/fragments");
-        int k = 0; long bytes = 0;
-        var swIo = Stopwatch.StartNew();
-        if (Directory.Exists(dir))
-            foreach (var f in Directory.GetFiles(dir, "*.frag")) { bytes += File.ReadAllBytes(f).LongLength; k++; }
-        swIo.Stop();
-
-        // 2) compute_ms: trabalho local constante (bate igual nos dois bracos, e' a linha de base realista)
-        var swCpu = Stopwatch.StartNew();
-        double acc = 0; for (int i = 1; i <= iters; i++) acc += Math.Sqrt(i);
-        swCpu.Stop();
-
-        // 3) filler comprimivel: com compressao dinamica ON o tamanho na rede despenca; OFF vai inteiro.
-        string filler = payloadKB > 0 ? new string('x', payloadKB * 1024) : "";
-
         Response.ContentType = "application/json";
+
+        int iters = 2000000, payloadKB = 200;
+        try { int t; if (int.TryParse(ConfigurationManager.AppSettings["ComputeIters"], out t) && t > 0) iters = t; } catch {}
+        try { int t; if (int.TryParse(ConfigurationManager.AppSettings["PayloadKB"], out t) && t >= 0) payloadKB = t; } catch {}
+
+        // 1) io_ms: le os fragmentos da raiz. Se a identidade nao alcanca o NAS, cai no catch -> err.
+        int k = 0; long bytes = 0; double ioMs = 0; string err = "";
+        try {
+            string dir = Server.MapPath("~/fragments");
+            var swIo = Stopwatch.StartNew();
+            if (Directory.Exists(dir))
+                foreach (var f in Directory.GetFiles(dir, "*.frag")) { bytes += File.ReadAllBytes(f).LongLength; k++; }
+            else err = "fragments dir nao encontrado: " + dir;
+            swIo.Stop(); ioMs = swIo.Elapsed.TotalMilliseconds;
+        } catch (Exception ex) { err = ex.GetType().Name + ": " + ex.Message; }
+
+        // 2) compute_ms: trabalho local constante
+        double cpuMs = 0;
+        try {
+            var swCpu = Stopwatch.StartNew();
+            double acc = 0; for (int i = 1; i <= iters; i++) acc += Math.Sqrt(i);
+            swCpu.Stop(); cpuMs = swCpu.Elapsed.TotalMilliseconds;
+            if (acc < 0) Response.Write(""); // impede o JIT de otimizar o loop pra fora
+        } catch {}
+
+        // 3) runtime/worker/bits/heap/ws: cada um guardado (trust restrito pode negar Process/WorkingSet)
+        string runtime = "n/a", worker = "w3wp", bits = "";
+        long heapMb = -1, wsMb = -1;
+        try { runtime = ".NET CLR " + Environment.Version; } catch {}
+        try { bits = Environment.Is64BitProcess ? "x64" : "x86"; } catch {}
+        try { worker = Process.GetCurrentProcess().ProcessName; } catch {}
+        try { heapMb = GC.GetTotalMemory(false) / 1048576; } catch {}
+        try { wsMb = Process.GetCurrentProcess().WorkingSet64 / 1048576; } catch {}
+
+        string filler = "";
+        try { if (payloadKB > 0) filler = new string('x', payloadKB * 1024); } catch {}
+
+        string errSafe = err.Replace("\\", "\\\\").Replace("\"", "'").Replace("\r", " ").Replace("\n", " ");
         var sb = new StringBuilder();
         sb.Append("{\"fragments\":").Append(k)
           .Append(",\"bytes\":").Append(bytes)
-          .Append(",\"io_ms\":").Append(swIo.Elapsed.TotalMilliseconds.ToString("F1"))
-          .Append(",\"compute_ms\":").Append(swCpu.Elapsed.TotalMilliseconds.ToString("F1"))
+          .Append(",\"io_ms\":").Append(ioMs.ToString("F1"))
+          .Append(",\"compute_ms\":").Append(cpuMs.ToString("F1"))
           .Append(",\"ts\":\"").Append(DateTime.UtcNow.ToString("o")).Append("\"")
-          .Append(",\"runtime\":\".NET CLR ").Append(Environment.Version).Append("\"")
-          .Append(",\"worker\":\"").Append(System.Diagnostics.Process.GetCurrentProcess().ProcessName).Append("\"")
-          .Append(",\"bits\":\"").Append(Environment.Is64BitProcess ? "x64" : "x86").Append("\"")
-          .Append(",\"heap_mb\":").Append(GC.GetTotalMemory(false) / 1048576)
-          .Append(",\"ws_mb\":").Append(System.Diagnostics.Process.GetCurrentProcess().WorkingSet64 / 1048576)
+          .Append(",\"runtime\":\"").Append(runtime).Append("\"")
+          .Append(",\"worker\":\"").Append(worker).Append("\"")
+          .Append(",\"bits\":\"").Append(bits).Append("\"")
+          .Append(",\"heap_mb\":").Append(heapMb)
+          .Append(",\"ws_mb\":").Append(wsMb)
+          .Append(",\"err\":\"").Append(errSafe).Append("\"")
           .Append(",\"filler\":\"").Append(filler).Append("\"}");
         Response.Write(sb.ToString());
     }
