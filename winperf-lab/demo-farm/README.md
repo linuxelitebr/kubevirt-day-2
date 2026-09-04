@@ -39,7 +39,32 @@ $c = Get-Credential DOMINIO\<conta_servico>          # conta que le o NAS
 
 O bootstrap instala as features do IIS, provisiona os 8 sites **espelhados no NAS e no disco local**,
 sobe o site do dashboard e imprime os proximos passos. (Se falhar criando arquivos no NAS = escrita;
-se os sites derem `fragments=0` = leitura do pool.)
+se os sites derem `fragments=0` = leitura do pool.) **Requer a VM no dominio** (ver Gotchas); se ela
+estiver em workgroup, use o Passo 1 alternativo abaixo.
+
+## Passo 1 alternativo - modo loopback (VM sem dominio)
+
+Se a VM esta em WORKGROUP (nao e' membro do dominio), o IIS nao consegue autenticar no NAS de dominio
+(o app pool nao tem identidade de dominio pra apresentar - ver Gotchas). Pra validar o rig e mostrar o
+mecanismo AGORA, sem dominio, sirva de um **share local (loopback SMB)** na propria VM: o app pool usa a
+identidade padrao e le via `Everyone`, sem credencial de dominio.
+
+```powershell
+New-Item -ItemType Directory C:\demo-src -Force | Out-Null
+New-SmbShare -Name demo -Path C:\demo-src -FullAccess Everyone -ErrorAction SilentlyContinue
+.\setup-demo-farm.ps1 -ContentUnc "\\$env:COMPUTERNAME\demo" -Sites 8
+```
+
+O que mostra: **loopback SMB vs disco local** - o mesmo mecanismo (overhead do protocolo SMB vs leitura
+direta), na maquina do cliente, reproduzivel, sem depender de dominio. Nao e' o NAS de producao, mas
+prova a arquitetura. O 2x2 (NAS/local x com/sem compressao) funciona igual.
+
+Pro **NAS real**, sem precisar do dashboard nele:
+- **Latencia real, SEM dominio:** rode `..\..\scripts\bench-smb.ps1` - ele roda como VOCE (tua sessao
+  autentica no NAS), entao mede o `stat` cold real contra o NAS de producao mesmo em workgroup. Ver
+  `winperf-lab\EXP5-*`. Combine esse numero com o dashboard loopback: latencia real + mecanismo visual.
+- **Dashboard ao vivo NO NAS real:** so' com a VM no dominio (Passo 1), ou credencial de dominio
+  guardada via `cmdkey` numa conta local de pool (workaround de workgroup).
 
 ## Passo 2 - abrir o dashboard
 
@@ -117,5 +142,14 @@ O dashboard e os prints mostram o **nome real do NAS/dominio**. Pra apresentar *
 - **PowerShell como Administrador** (o bootstrap instala features do IIS).
 - **UNC, nao letra mapeada** — drive mapeado some em sessao elevada.
 - **`-Out` em disco local** (`C:\winperf\...`), nunca no proprio share.
-- **`-PoolCredential`** com a conta que le o NAS do dominio (senao `fragments=0`).
+- **A VM PRECISA estar no dominio pra usar o NAS real.** Numa VM em WORKGROUP o IIS nao consegue
+  apresentar credencial de dominio (logon local de conta de dominio e' impossivel fora do dominio):
+  a conta como identidade de pool falha com 503, e como Connect As com 500.19 (0x8007052e "can not
+  log on locally"). So' auth de REDE funciona em workgroup (ex.: mapear X: com credencial), e o IIS
+  nao usa isso pras leituras de arquivo da app. Ingresse a VM no dominio (como as VMs reais do
+  cliente) e sirva o NAS com **ApplicationPoolIdentity** + a **conta de maquina** (`DOMINIO\<host>$`)
+  liberada no share (nivel de share E NTFS). Em workgroup, so' o **share loopback local** funciona -
+  valida o rig e mostra o mecanismo, mas nao e' o NAS real.
+- **`-PoolCredential`** e' aplicado como **Connect As** da vdir (nao como identidade do pool). So'
+  funciona com a VM no dominio; em workgroup, use loopback sem credencial.
 - Compressao: o toggle precisa da feature de compressao dinamica instalada (o bootstrap instala).
