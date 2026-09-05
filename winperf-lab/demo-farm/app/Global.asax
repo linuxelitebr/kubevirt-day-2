@@ -2,11 +2,10 @@
 <%@ Import Namespace="System.Configuration" %>
 <script runat="server">
     // Modo "app pesada de memoria" (reproduz o padrao do cliente que pede 16 vCPU / 96 GB):
-    // no start do pool, aloca MemLoadMB e SEGURA a referencia (simula o working set gigante que o app
-    // carrega). Isso encarece o cold-start (a 1a request espera o carregamento) e deixa a RAM parada.
-    // Os blocos tem tamanhos variados (1-4 MB) pra caírem no LOH e FRAGMENTAR o heap (como um app real
-    // que aloca/segura muitos objetos grandes). MemLoadMB = 0 desliga (comportamento leve, o default).
-    static object _held;
+    // no start do pool, aloca MemLoadMB e SEGURA a referencia em Application["memHold"] (simula o cache
+    // grande carregado na subida). Encarece o cold-start e deixa a RAM parada. Blocos de 1-4 MB caem no
+    // LOH e fragmentam, como um app real que segura muitos objetos grandes. MemLoadMB = 0 desliga.
+    // O Default.aspx le esse buffer no ScanMB (pra tornar a app memory-bound e NUMA-sensivel).
     void Application_Start(object sender, EventArgs e)
     {
         int mb;
@@ -17,14 +16,14 @@
         int done = 0;
         while (done < mb)
         {
-            int sizeMB = 1 + rnd.Next(4);                 // 1-4 MB -> vai pro Large Object Heap e fragmenta
+            int sizeMB = 1 + rnd.Next(4);                 // 1-4 MB -> Large Object Heap, fragmenta
             var b = new byte[sizeMB * 1024 * 1024];
-            b[0] = 1; b[b.Length - 1] = 1;                // toca as paginas pra virarem working set de verdade
+            b[0] = 1; b[b.Length - 1] = 1;                // toca as paginas (vira working set real)
             chunks.Add(b);
             done += sizeMB;
         }
-        _held = chunks;                                    // segura pra o GC nao coletar (working set parado)
-        Application["MemLoadMs"] = sw.ElapsedMilliseconds;  // custo de cold-start do carregamento
-        Application["MemLoadMB"] = done;
+        Application["memHold"]  = chunks;                  // segura pra o GC nao coletar
+        Application["memLoadMs"] = sw.ElapsedMilliseconds;
+        Application["memLoadMB"] = done;
     }
 </script>

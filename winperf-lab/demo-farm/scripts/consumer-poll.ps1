@@ -15,7 +15,7 @@ param(
   [string]$HostName = 'localhost'
 )
 $ErrorActionPreference = 'Continue'
-if (-not (Test-Path $Out)) { "ts,site,port,total_ms,io_ms,compute_ms,fragments,http" | Out-File $Out -Encoding utf8 }
+if (-not (Test-Path $Out)) { "ts,site,port,total_ms,io_ms,compute_ms,scan_ms,fragments,ws_mb,heap_mb,leak_mb,http" | Out-File $Out -Encoding utf8 }
 
 $sum = @{}; $cnt = @{}
 for ($i=1; $i -le $Sites; $i++) { $sum[$i] = 0.0; $cnt[$i] = 0 }
@@ -27,19 +27,20 @@ while ((Get-Date) -lt $deadline) {
     $port = $BasePort + $i
     $url  = "http://{0}:{1}/Default.aspx" -f $HostName,$port
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $io = ''; $cpu = ''; $frag = ''; $code = 0
+    $io = ''; $cpu = ''; $frag = ''; $ws = ''; $heap = ''; $leak = ''; $scan = ''; $code = 0
     try {
       $r = Invoke-WebRequest -UseBasicParsing -Uri $url -TimeoutSec 60
       $code = [int]$r.StatusCode
       $j = $r.Content | ConvertFrom-Json
       $io = $j.io_ms; $cpu = $j.compute_ms; $frag = $j.fragments
+      $ws = $j.ws_mb; $heap = $j.heap_mb; $leak = $j.leak_mb; $scan = $j.scan_ms
     } catch { $code = -1 }
     $sw.Stop()
     $tot = [Math]::Round($sw.Elapsed.TotalMilliseconds,1)
     $sum[$i] += $tot; $cnt[$i]++
     $avg = [Math]::Round($sum[$i]/$cnt[$i],1)
-    "$([DateTime]::UtcNow.ToString('o')),demo$i,$port,$tot,$io,$cpu,$frag,$code" | Add-Content $Out
-    $rows += [pscustomobject]@{ Site="demo$i"; Port=$port; total_ms=$tot; io_ms=$io; compute_ms=$cpu; avg_ms=$avg; http=$code }
+    "$([DateTime]::UtcNow.ToString('o')),demo$i,$port,$tot,$io,$cpu,$scan,$frag,$ws,$heap,$leak,$code" | Add-Content $Out
+    $rows += [pscustomobject]@{ Site="demo$i"; Port=$port; total_ms=$tot; io_ms=$io; ws_mb=$ws; leak_mb=$leak; avg_ms=$avg; http=$code }
   }
   Clear-Host
   Write-Host ("consumer-poll  " + (Get-Date -Format 'HH:mm:ss') + "   (Ctrl+C encerra)  saida: $Out") -ForegroundColor Cyan
