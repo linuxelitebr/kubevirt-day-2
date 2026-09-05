@@ -1,25 +1,16 @@
-# demo-farm: content-on-NAS vs disco local, ao vivo
+# demo-farm: IIS content-on-NAS vs local disk, measured live
 
-Farm IIS que reproduz o padrao do cliente (varios sites servindo conteudo de um concentrador NAS via
-UNC/DFS) e mede, na tela, o custo desse padrao. Cada site roda uma app **ASP.NET compilada** (nao
-estatico); o dashboard mostra `io_ms` (leitura do conteudo da raiz) separado de `compute_ms` (trabalho
-local constante), e o tamanho na rede (efeito da compressao).
+An IIS farm that reproduces the client pattern (many sites serving their content from one NAS over UNC/DFS) and measures what that pattern costs, on screen. Each site runs a compiled ASP.NET app, not static serving. The dashboard separates `io_ms` (reading content from the root) from `compute_ms` (constant local work), and shows the on-the-wire size (the compression effect).
 
-**O que prova:** o tempo de resposta e' quase todo **entrega de conteudo** (I/O contra o NAS), nao
-trabalho da app. E' platform-independent: roda igual em VMware e OpenShift. Se a fala "e' .NET, vai pra
-memoria, nao toca disco" fosse verdade, NAS e local dariam o mesmo numero. Nao dao.
+What it shows: the response time is almost entirely content delivery (I/O against the share), not application work. That is platform-independent, so it runs the same on VMware and OpenShift. If "it is .NET, everything stays in memory and never touches disk" were the whole story, NAS and local would read the same. They do not.
 
----
+## Prerequisites
 
-## Pre-requisitos
+- A Windows VM (Server 2016+, tested on Server 2022), PowerShell as Administrator.
+- For the real NAS: the VM joined to the domain, plus a share you can write to (to provision) and read (to serve). A workgroup VM can only run the loopback mode below. See Authentication.
+- Outbound internet on the VM to pull the package, or copy the ZIP in another way.
 
-- VM Windows (Server 2016+; Server 2022 testado), **PowerShell como Administrador**.
-- Um **share no NAS** que voce possa **escrever** (pra provisionar) e **ler** (pra servir).
-- A **conta de servico do dominio** que le o NAS (a mesma que a app real usa). Sem ela, os sites
-  respondem mas com `fragments=0` (a conta de maquina nao tem acesso ao NAS do dominio).
-- Saida pra internet na VM pra baixar o pacote (ou copie o ZIP por outro meio).
-
-## Passo 0 - baixar o pacote (na VM, PowerShell Admin)
+## 1. Get the package
 
 ```powershell
 Set-Location C:\
@@ -30,24 +21,18 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 Get-ChildItem C:\kubevirt-day-2-main -Recurse -File | Unblock-File
 ```
 
-## Passo 1 - subir a farm (um comando)
+## 2. Bring up the farm
+
+Domain-joined VM against the real NAS. Pass the account that reads the NAS. It is applied as the site's Connect As credential, not the app pool identity, so the pool starts as ApplicationPoolIdentity and IIS reads the UNC as that account.
 
 ```powershell
-$c = Get-Credential DOMINIO\<conta_servico>          # conta que le o NAS
+$c = Get-Credential DOMAIN\<account>
 .\bootstrap-demo.ps1 -ContentUnc \\<nas>\<share>\demo-farm -Sites 8 -PoolCredential $c
 ```
 
-O bootstrap instala as features do IIS, provisiona os 8 sites **espelhados no NAS e no disco local**,
-sobe o site do dashboard e imprime os proximos passos. (Se falhar criando arquivos no NAS = escrita;
-se os sites derem `fragments=0` = leitura do pool.) **Requer a VM no dominio** (ver Gotchas); se ela
-estiver em workgroup, use o Passo 1 alternativo abaixo.
+`bootstrap-demo.ps1` installs the IIS features, provisions 8 sites mirrored on the NAS and on local disk, registers application/json for dynamic compression, brings up the dashboard site, and prints the next steps.
 
-## Passo 1 alternativo - modo loopback (VM sem dominio)
-
-Se a VM esta em WORKGROUP (nao e' membro do dominio), o IIS nao consegue autenticar no NAS de dominio
-(o app pool nao tem identidade de dominio pra apresentar - ver Gotchas). Pra validar o rig e mostrar o
-mecanismo AGORA, sem dominio, sirva de um **share local (loopback SMB)** na propria VM: o app pool usa a
-identidade padrao e le via `Everyone`, sem credencial de dominio.
+Workgroup VM with no domain. Serve from a local loopback share. The pool uses the default identity and reads via Everyone, so no domain credential is involved.
 
 ```powershell
 New-Item -ItemType Directory C:\demo-src -Force | Out-Null
@@ -55,101 +40,85 @@ New-SmbShare -Name demo -Path C:\demo-src -FullAccess Everyone -ErrorAction Sile
 .\setup-demo-farm.ps1 -ContentUnc "\\$env:COMPUTERNAME\demo" -Sites 8
 ```
 
-O que mostra: **loopback SMB vs disco local** - o mesmo mecanismo (overhead do protocolo SMB vs leitura
-direta), na maquina do cliente, reproduzivel, sem depender de dominio. Nao e' o NAS de producao, mas
-prova a arquitetura. O 2x2 (NAS/local x com/sem compressao) funciona igual.
+Loopback shows SMB vs local disk: the same mechanism (SMB protocol overhead vs a direct read), reproducible, without a domain. It is not the production NAS, but it proves the architecture, and the 2x2 works the same. For the real NAS latency without a domain, use `bench-smb.ps1`: it runs as you, so your session authenticates to the NAS. See `winperf-lab\EXP5-*`.
 
-Pro **NAS real**, sem precisar do dashboard nele:
-- **Latencia real, SEM dominio:** rode `..\..\scripts\bench-smb.ps1` - ele roda como VOCE (tua sessao
-  autentica no NAS), entao mede o `stat` cold real contra o NAS de producao mesmo em workgroup. Ver
-  `winperf-lab\EXP5-*`. Combine esse numero com o dashboard loopback: latencia real + mecanismo visual.
-- **Dashboard ao vivo NO NAS real:** so' com a VM no dominio (Passo 1), ou credencial de dominio
-  guardada via `cmdkey` numa conta local de pool (workaround de workgroup).
+## 3. Open the dashboard
 
-## Passo 2 - abrir o dashboard
+Open `http://localhost:9000/dashboard.html?base=9000&sites=8` by its URL, from the dashboard site, not as a local file.
 
-```
-http://localhost:9000/dashboard.html?base=9000&sites=8
-```
+Each site shows `total_ms` (with a green/amber/red severity dot), the io+compute bar, `io_ms`, `compute_ms`, on-the-wire KB, and HTTP status. The header badge reports the runtime (`.NET CLR ... w3wp x64`), which makes explicit that a compiled ASP.NET app is serving, not static files. Severity thresholds are tunable with `...&warn=150&slow=400` (ms).
 
-Mostra por site: `total_ms` (com ponto de severidade verde/ambar/vermelho), a barra `io+compute`,
-`io_ms`, `compute_ms`, `rede KB` e o HTTP. No topo, a mediana das sites e o runtime `.NET CLR ... w3wp`.
-Limiares ajustaveis: `...&warn=150&slow=400` (ms).
+## 4. Capture the 2x2
 
-## Passo 3 - o 2x2 (NAS/local x com/sem compressao)
-
-Pra cada cenario: rode o toggle no PowerShell, espere ~15s estabilizar, selecione o cenario no
-dashboard e clique **Capturar**. O comparativo dos 4 aparece embaixo.
+The dashboard auto-detects the live scenario (backing reported by the app, compression inferred from the wire size) and selects the matching slot, shown by the "detectado" badge. Switch backing and compression in PowerShell, wait for the numbers to settle and the badge to match, then click Capturar. The four combinations are NAS/local by on/off.
 
 ```powershell
-# A) NAS, sem compressao (o cliente)
 .\toggle-root.ps1 -Backing nas   -ContentUnc \\<nas>\<share>\demo-farm -ContentLocal C:\demo-farm
-.\toggle-compression.ps1 -State off
-# B) NAS, com compressao
-.\toggle-compression.ps1 -State on
-# C) Local, sem compressao
 .\toggle-root.ps1 -Backing local -ContentUnc \\<nas>\<share>\demo-farm -ContentLocal C:\demo-farm
-.\toggle-compression.ps1 -State off
-# D) Local, com compressao (o ideal)
 .\toggle-compression.ps1 -State on
+.\toggle-compression.ps1 -State off
 ```
 
-O momento de ouro e' o **C**: virar pra local faz o vermelho (`io_ms`) despencar. Se fosse tudo memoria,
-nao mudaria. Troque a metrica do comparativo (total_ms / io_ms / rede KB) pra mostrar cada eixo.
+The first request after each change is a cold recompile, so give it about 15 seconds before you Capturar. Switching the root to local drops `io_ms` from tens of milliseconds to about one, so `total` collapses and the red bar shrinks to a sliver. That is the contrast that closes the case.
 
-## Passo 4 - rodar nos DOIS hypervisors (OpenShift e VMware)
+Read the comparison by metric. `total_ms` and `io_ms` put NAS far above local (the SMB cost). On-the-wire KB puts compression far below no-compression (the bandwidth effect, roughly 200 KB to 2 KB). Compression and backing are different axes: on loopback, compression barely moves `total_ms` because the transfer is local, but it cuts the wire size, which is what a remote user pays. Do not conflate the two.
 
-Este e' o argumento de plataforma: **o mesmo pacote, o mesmo NAS, numa VM no OpenShift e numa VM no
-VMware**. Repita os Passos 0-3 em cada VM (apontando o `-ContentUnc` pro **mesmo** NAS).
+## 5. Run it on both hypervisors
 
-- Capture o 2x2 no dashboard de **cada** VM e ponha as duas telas lado a lado.
-- Pra numeros, rode o poller com nome de arquivo por plataforma:
-  ```powershell
-  .\consumer-poll.ps1 -Sites 8 -BasePort 9000 -Out C:\winperf\demo-poll-openshift.csv   # na VM OpenShift
-  .\consumer-poll.ps1 -Sites 8 -BasePort 9000 -Out C:\winperf\demo-poll-vmware.csv       # na VM VMware
-  ```
+Repeat steps 1 to 4 on a Windows VM on OpenShift and on one on VMware, pointing `-ContentUnc` at the same NAS. Capture the 2x2 on each and put the two dashboards side by side. For numbers, name the poller output per platform:
 
-Leitura esperada: o `io_ms` (custo do NAS) e' **parecido nos dois** hypervisors -> a plataforma nao
-adiciona custo de entrega; o gargalo e' a arquitetura content-on-NAS, que existe igual nos dois lados.
-O braco **local** e' rapido nos dois. Isso fecha "nao e' o hypervisor" com o mesmo grafico.
+```powershell
+.\consumer-poll.ps1 -Sites 8 -BasePort 9000 -Out C:\winperf\demo-poll-openshift.csv
+.\consumer-poll.ps1 -Sites 8 -BasePort 9000 -Out C:\winperf\demo-poll-vmware.csv
+```
 
-## Como ler os resultados
+Expected: `io_ms` (the NAS cost) is close on both hypervisors, so the platform adds no delivery cost, and the local arm is fast on both. Same graph, no hypervisor to blame.
 
-| Observacao | Leitura |
+## Authentication: why the real NAS needs a domain
+
+A workgroup VM cannot serve the domain NAS through IIS. Your interactive session reaches it because you present a domain credential over the network (the X: mapping, or `bench-smb` running as you). IIS runs as the app pool identity, and on a workgroup VM that identity has no domain credential to present. A domain account set as the pool identity fails to start the pool (503, it needs "Log on as a batch job"); set as Connect As it fails the credential logon (500.19, 0x8007052e, "can not log on locally"). Only network auth works from a workgroup, and IIS does not use it for the app's file reads.
+
+For the real NAS, join the VM to the domain, the way the client's real IIS VMs are, and serve with ApplicationPoolIdentity plus the machine account (`DOMAIN\<host>$`) granted read on the share at both the share and NTFS level. In a workgroup, use loopback mode and take the real NAS latency from `bench-smb`.
+
+## IIS settings this rig applies, and why
+
+Dynamic compression for application/json. IIS compresses `text/*` and javascript by default, not `application/json`, so turning compression on alone leaves the JSON wire size unchanged. `setup-demo-farm.ps1` registers the type:
+
+```powershell
+Add-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Filter 'system.webServer/httpCompression/dynamicTypes' -Name '.' -Value @{mimeType='application/json'; enabled='true'}
+```
+
+The client app serves `text/html`, which is compressed by default, so there the fix is enabling the feature, which was off.
+
+Connect As, not pool identity. `-PoolCredential` is set as the site's UNC credential, so the pool starts under the default identity and only the content read uses the account.
+
+Anonymous authentication. If site hardening left Windows auth on and anonymous off, the dashboard's cross-port fetch gets 401. Enable anonymous on the demo sites:
+
+```powershell
+1..8 | ForEach-Object { Set-WebConfigurationProperty -PSPath "IIS:\Sites\demo$_" -Filter 'system.webServer/security/authentication/anonymousAuthentication' -Name enabled -Value $true }
+```
+
+## Memory-heavy mode (reproducing the 16 vCPU / 96 GB app)
+
+Set `MemLoadMB` in `app\web.config` above 0 (for example 2000 for 2 GB per site) before setup, or on the deployed sites and recycle. `Global.asax` allocates and holds that memory at pool start in 1-4 MB chunks (working set plus LOH fragmentation), so the first request pays the load. `Default.aspx` reports `heap_mb` and `ws_mb`. Size it to your lab.
+
+## Reading the results
+
+| Observation | Reading |
 |---|---|
-| `io_ms` alto, barra quase toda vermelha | a resposta e' ~toda leitura de conteudo do NAS, nao trabalho da app |
-| virar pra **local** derruba o `io_ms` | prova que o custo e' entrega de conteudo (refuta "vai pra memoria, nao toca disco") |
-| `io_ms` parecido em OpenShift e VMware | a plataforma nao e' o gargalo; e' a arquitetura |
-| `rede KB` cai muito com compressao on | a compressao dinamica desligada e' um fator (200 KB -> ~2 KB) |
+| `io_ms` high, bar mostly red | the response is almost all content read from the share, not app work |
+| switching to local drops `io_ms` | the cost is content delivery, which refutes "in memory, never touches disk" |
+| `io_ms` close on OpenShift and VMware | the platform is not the bottleneck, the architecture is |
+| wire KB drops with compression | dynamic compression being off is a factor (roughly 200 KB to 2 KB) |
 
-## Extras
+## Gotchas
 
-- **Modo "app pesada de memoria"** (reproduz o 16 vCPU / 96 GB): edite `app\web.config` e ponha
-  `MemLoadMB` > 0 (ex.: 2000 = 2 GB por site) antes do setup, ou nos sites ja criados e recicle o pool.
-  O `Global.asax` aloca e segura essa RAM no start (working set + fragmentacao de LOH); a 1a request paga
-  o carregamento (cold-start caro). `Default.aspx` reporta `heap_mb`/`ws_mb`. Dimensione pro seu lab.
-- **Fingerprint de memoria/NUMA do app real:** `..\..\scripts\capture-memory.ps1 -Out C:\winperf\mem.txt -Seconds 60`
-  (bitness do pool, GC/LOH/fragmentacao, working set, topologia NUMA). Rode com o app sob carga.
-- **Latencia crua do NAS:** `..\..\scripts\bench-smb.ps1` (ver `winperf-lab\EXP5-*`).
+- Run PowerShell as Administrator; the bootstrap installs IIS features.
+- Use UNC, not a mapped drive. A mapped drive is per-logon-session and the app pool does not see it.
+- Write `-Out` to local disk, never to the share under test.
+- Open the dashboard by its URL, not as a local file, or the cross-port fetches are blocked.
+- Error triage: 503 is the app pool down (identity or logon right); 500.19 is the config or credential logon; 500 is the app throwing, and the dashboard shows it in the `err` field.
 
-## De-identificacao
+## De-identification
 
-O dashboard e os prints mostram o **nome real do NAS/dominio**. Pra apresentar **ao cliente**, tudo bem
-(e' o ambiente deles). Pro **post/repo publico**, mascare tudo (NAS, dominio, sites) antes.
-
-## Gotchas (o que morde)
-
-- **PowerShell como Administrador** (o bootstrap instala features do IIS).
-- **UNC, nao letra mapeada** — drive mapeado some em sessao elevada.
-- **`-Out` em disco local** (`C:\winperf\...`), nunca no proprio share.
-- **A VM PRECISA estar no dominio pra usar o NAS real.** Numa VM em WORKGROUP o IIS nao consegue
-  apresentar credencial de dominio (logon local de conta de dominio e' impossivel fora do dominio):
-  a conta como identidade de pool falha com 503, e como Connect As com 500.19 (0x8007052e "can not
-  log on locally"). So' auth de REDE funciona em workgroup (ex.: mapear X: com credencial), e o IIS
-  nao usa isso pras leituras de arquivo da app. Ingresse a VM no dominio (como as VMs reais do
-  cliente) e sirva o NAS com **ApplicationPoolIdentity** + a **conta de maquina** (`DOMINIO\<host>$`)
-  liberada no share (nivel de share E NTFS). Em workgroup, so' o **share loopback local** funciona -
-  valida o rig e mostra o mecanismo, mas nao e' o NAS real.
-- **`-PoolCredential`** e' aplicado como **Connect As** da vdir (nao como identidade do pool). So'
-  funciona com a VM no dominio; em workgroup, use loopback sem credencial.
-- Compressao: o toggle precisa da feature de compressao dinamica instalada (o bootstrap instala).
+The dashboard and screenshots show the real NAS and domain names. That is fine to present to the client, since it is their environment. For a post or a public repo, mask them.
