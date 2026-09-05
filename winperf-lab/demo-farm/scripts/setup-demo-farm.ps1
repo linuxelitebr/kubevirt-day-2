@@ -35,6 +35,14 @@ param(
 $ErrorActionPreference = 'Stop'
 Import-Module WebAdministration
 
+# O IIS NAO comprime application/json por padrao (so' text/* e javascript; json cai no catch-all */*
+# desabilitado). Registra json na compressao dinamica pra o toggle de compressao valer na resposta.
+# (A feature de compressao dinamica em si e' instalada pelo bootstrap-demo.ps1.)
+try {
+  Remove-WebConfigurationProperty -PSPath 'MACHINE/WEBROOT/APPHOST' -Filter 'system.webServer/httpCompression/dynamicTypes' -Name '.' -AtElement @{mimeType='application/json'} -ErrorAction SilentlyContinue
+  Add-WebConfigurationProperty    -PSPath 'MACHINE/WEBROOT/APPHOST' -Filter 'system.webServer/httpCompression/dynamicTypes' -Name '.' -Value @{mimeType='application/json'; enabled='true'}
+} catch { Write-Host ("  aviso: nao registrei application/json na compressao dinamica (" + $_.Exception.Message + ")") -ForegroundColor DarkGray }
+
 $AppSource = (Resolve-Path $AppSource).Path
 foreach ($root in @($ContentUnc, $ContentLocal)) {
   if (-not (Test-Path $root)) { New-Item -ItemType Directory -Path $root -Force | Out-Null }
