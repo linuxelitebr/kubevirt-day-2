@@ -45,6 +45,7 @@
   .sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:middle;border:1px solid rgba(0,0,0,.15)}
   .big{font-size:23px;font-weight:600;font-variant-numeric:tabular-nums;letter-spacing:-.01em}
   .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
   .badge{background:#eff6fc;border:1px solid #b3d3ea;color:#005299;border-radius:3px;padding:2px 8px;font-size:12px;font-weight:600;white-space:nowrap}
   .note{color:var(--mut);font-size:12px;margin-top:6px}
   /* severidade sobria (verde/ambar/vermelho por limiar), estilo Task Manager - nao cartoon */
@@ -67,10 +68,11 @@
 <main>
   <section class="panel">
     <h2>Agora (mediana das sites)</h2>
-    <div class="grid3">
+    <div class="grid4">
       <div><div class="mut">total</div><div class="big"><span id="mTot">-</span> <span class="mut" style="font-size:14px">ms</span></div></div>
       <div><div class="mut">io (leitura da raiz)</div><div class="big" style="color:var(--io)"><span id="mIo">-</span> <span class="mut" style="font-size:14px">ms</span></div></div>
       <div><div class="mut">tamanho na rede</div><div class="big" style="color:var(--wire)"><span id="mWire">-</span> <span class="mut" style="font-size:14px">KB</span></div></div>
+      <div><div class="mut">RAM w3wp (mediana)</div><div class="big"><span id="mWs">-</span> <span class="mut" style="font-size:14px">MB</span></div></div>
     </div>
   </section>
 
@@ -107,7 +109,7 @@
   <section class="panel">
     <h2>Sites ao vivo</h2>
     <table>
-      <thead><tr><th class="l">site</th><th>total_ms</th><th style="width:38%">barra (io+compute)</th><th>io_ms</th><th>compute_ms</th><th>rede KB</th><th>http</th></tr></thead>
+      <thead><tr><th class="l">site</th><th>total_ms</th><th style="width:34%">barra (io+compute)</th><th>io_ms</th><th>compute_ms</th><th>rede KB</th><th>RAM MB</th><th>http</th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
   </section>
@@ -139,17 +141,17 @@
   function curMed(field){ var vals=[]; for(var n in win){ var m=med(win[n].map(function(s){return s[field]})); if(m!=null) vals.push(m);} return med(vals); }
 
   async function hitOne(s){
-    var t0=performance.now(); var http=0, io=null, cpu=null, wire=null, err='', backing='';
+    var t0=performance.now(); var http=0, io=null, cpu=null, wire=null, err='', backing='', ws=null;
     try{
       var r=await fetch(s.url,{cache:'no-store'}); http=r.status;
-      var j=await r.json(); io=parseFloat(j.io_ms); cpu=parseFloat(j.compute_ms); err=j.err||''; backing=j.backing||'';
+      var j=await r.json(); io=parseFloat(j.io_ms); cpu=parseFloat(j.compute_ms); err=j.err||''; backing=j.backing||''; ws=(j.ws_mb!=null?parseFloat(j.ws_mb):null);
       if(!rtSet && j.runtime){ document.getElementById('rt').textContent='ASP.NET · '+j.runtime+' · '+(j.worker||'w3wp')+'.exe · '+(j.bits||''); rtSet=true; }
       var ent=performance.getEntriesByName(s.url); var e=ent[ent.length-1];
       if(e && e.encodedBodySize) wire=e.encodedBodySize/1024;
     }catch(e){ http=-1; }
     var tot=performance.now()-t0;
     var comp=(wire!=null && wire<50);
-    return {name:s.name, tot:tot, io:io, cpu:cpu, wire:wire, http:http, err:err, backing:backing, comp:comp};
+    return {name:s.name, tot:tot, io:io, cpu:cpu, wire:wire, http:http, err:err, backing:backing, comp:comp, ws:ws};
   }
 
   function fmt(x,d){ return x==null?'-':x.toFixed(d==null?1:d); }
@@ -165,6 +167,7 @@
         '<td><div class="bar"><i class="io" style="width:'+ioP+'%"></i><i class="cpu" style="width:'+cpuP+'%"></i></div></td>'+
         '<td style="color:var(--io)">'+fmt(s.io)+'</td><td>'+fmt(s.cpu)+'</td>'+
         '<td style="color:var(--wire)">'+fmt(s.wire)+'</td>'+
+        '<td>'+(s.ws!=null?Math.round(s.ws):'-')+'</td>'+
         '<td style="color:'+(s.http===200?'var(--ok)':'var(--io)')+'">'+s.http+'</td></tr>';
     }).join('');
     document.getElementById('rows').innerHTML=html;
@@ -174,6 +177,7 @@
     document.getElementById('mTot').textContent=fmt(curMed('tot'));
     document.getElementById('mIo').textContent=fmt(curMed('io'));
     document.getElementById('mWire').textContent=fmt(curMed('wire'));
+    var w=curMed('ws'); document.getElementById('mWs').textContent=(w!=null?Math.round(w):'-');
   }
 
   function renderCmp(){
