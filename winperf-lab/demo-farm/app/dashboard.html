@@ -77,13 +77,14 @@
   <section class="panel">
     <h2>Capturar cenário 2×2</h2>
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-      <span class="mut">Cenário atual:</span>
+      <span class="mut">Cenário (auto):</span>
       <select id="slot">
         <option value="nas_nocomp">NAS · sem compressão</option>
         <option value="nas_comp">NAS · com compressão</option>
         <option value="local_nocomp">Local · sem compressão</option>
         <option value="local_comp">Local · com compressão</option>
       </select>
+      <span class="badge" id="detected"></span>
       <button class="primary" id="cap">Capturar cenário atual</button>
       <button id="reset">Limpar capturas</button>
       <span class="mut" id="capMsg"></span>
@@ -138,16 +139,17 @@
   function curMed(field){ var vals=[]; for(var n in win){ var m=med(win[n].map(function(s){return s[field]})); if(m!=null) vals.push(m);} return med(vals); }
 
   async function hitOne(s){
-    var t0=performance.now(); var http=0, io=null, cpu=null, wire=null, err='';
+    var t0=performance.now(); var http=0, io=null, cpu=null, wire=null, err='', backing='';
     try{
       var r=await fetch(s.url,{cache:'no-store'}); http=r.status;
-      var j=await r.json(); io=parseFloat(j.io_ms); cpu=parseFloat(j.compute_ms); err=j.err||'';
+      var j=await r.json(); io=parseFloat(j.io_ms); cpu=parseFloat(j.compute_ms); err=j.err||''; backing=j.backing||'';
       if(!rtSet && j.runtime){ document.getElementById('rt').textContent='ASP.NET · '+j.runtime+' · '+(j.worker||'w3wp')+'.exe · '+(j.bits||''); rtSet=true; }
       var ent=performance.getEntriesByName(s.url); var e=ent[ent.length-1];
       if(e && e.encodedBodySize) wire=e.encodedBodySize/1024;
     }catch(e){ http=-1; }
     var tot=performance.now()-t0;
-    return {name:s.name, tot:tot, io:io, cpu:cpu, wire:wire, http:http, err:err};
+    var comp=(wire!=null && wire<50);
+    return {name:s.name, tot:tot, io:io, cpu:cpu, wire:wire, http:http, err:err, backing:backing, comp:comp};
   }
 
   function fmt(x,d){ return x==null?'-':x.toFixed(d==null?1:d); }
@@ -192,8 +194,22 @@
   async function cycle(){
     var samples=await Promise.all(urls.map(hitOne));
     samples.forEach(function(s){ push(s.name,s); });
-    renderRows(samples); renderAgg();
+    renderRows(samples); renderAgg(); autoDetect(samples);
     if(performance.getEntriesByType('resource').length>400) performance.clearResourceTimings();
+  }
+
+  // auto-detecta o cenario atual (backing reportado pela app + compressao inferida do tamanho na rede)
+  // e seleciona sozinho o slot certo, pra o Capturar nunca cair no cenario errado.
+  function autoDetect(samples){
+    var det=document.getElementById('detected');
+    var g=samples.filter(function(x){return x.http===200 && x.backing;});
+    if(!g.length){ if(det) det.textContent=''; return; }
+    var nas=g.filter(function(x){return x.backing==='nas';}).length >= g.length/2;
+    var comp=g.filter(function(x){return x.comp;}).length >= g.length/2;
+    var key=(nas?'nas':'local')+'_'+(comp?'comp':'nocomp');
+    var sel=document.getElementById('slot');
+    if(sel && sel.value!==key) sel.value=key;
+    if(det) det.textContent='detectado: '+LABELS[key];
   }
 
   document.getElementById('cap').onclick=function(){

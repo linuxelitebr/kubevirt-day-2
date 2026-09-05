@@ -51,6 +51,10 @@
         try { heapMb = GC.GetTotalMemory(false) / 1048576; } catch {}
         try { wsMb = Process.GetCurrentProcess().WorkingSet64 / 1048576; } catch {}
 
+        // backing: nas (physicalPath UNC) vs local (letra de drive) - pro dashboard auto-detectar o cenario
+        string backing = "local";
+        try { string ap = System.Web.Hosting.HostingEnvironment.ApplicationPhysicalPath; if (!string.IsNullOrEmpty(ap) && ap.StartsWith("\\\\")) backing = "nas"; } catch {}
+
         string filler = "";
         try { if (payloadKB > 0) filler = new string('x', payloadKB * 1024); } catch {}
 
@@ -66,6 +70,7 @@
           .Append(",\"bits\":\"").Append(bits).Append("\"")
           .Append(",\"heap_mb\":").Append(heapMb)
           .Append(",\"ws_mb\":").Append(wsMb)
+          .Append(",\"backing\":\"").Append(backing).Append("\"")
           .Append(",\"err\":\"").Append(errSafe).Append("\"")
           .Append(",\"filler\":\"").Append(filler).Append("\"}");
         Response.Write(sb.ToString());
