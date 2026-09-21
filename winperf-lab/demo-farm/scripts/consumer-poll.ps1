@@ -15,6 +15,12 @@ param(
   [string]$HostName = 'localhost'
 )
 $ErrorActionPreference = 'Continue'
+
+# cria a pasta do CSV se nao existir: o README sugere C:\winperf\... e nada garante que ela exista,
+# entao sem isto o script morre com DirectoryNotFoundException no meio da coleta.
+$outDir = Split-Path -Parent $Out
+if ($outDir -and -not (Test-Path $outDir)) { New-Item -ItemType Directory -Force -Path $outDir | Out-Null }
+
 if (-not (Test-Path $Out)) { "ts,site,port,total_ms,io_ms,compute_ms,scan_ms,fragments,ws_mb,heap_mb,leak_mb,http" | Out-File $Out -Encoding utf8 }
 
 $sum = @{}; $cnt = @{}

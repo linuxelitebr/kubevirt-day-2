@@ -27,7 +27,7 @@ Domain-joined VM against the real NAS. Pass the account that reads the NAS. It i
 
 ```powershell
 $c = Get-Credential DOMAIN\<account>
-.\bootstrap-demo.ps1 -ContentUnc \\<nas>\<share>\demo-farm -Sites 8 -PoolCredential $c
+.\bootstrap-demo.ps1 -ContentUnc '\\<nas>\<share>\demo-farm' -Sites 8 -PoolCredential $c
 ```
 
 `bootstrap-demo.ps1` installs the IIS features, provisions 8 sites mirrored on the NAS and on local disk, registers application/json for dynamic compression, brings up the dashboard site, and prints the next steps.
@@ -53,8 +53,8 @@ Each site shows `total_ms` (with a green/amber/red severity dot), the io+compute
 The dashboard auto-detects the live scenario (backing reported by the app, compression inferred from the wire size) and selects the matching slot, shown by the "detectado" badge. Switch backing and compression in PowerShell, wait for the numbers to settle and the badge to match, then click Capturar. The four combinations are NAS/local by on/off.
 
 ```powershell
-.\toggle-root.ps1 -Backing nas   -ContentUnc \\<nas>\<share>\demo-farm -ContentLocal C:\demo-farm
-.\toggle-root.ps1 -Backing local -ContentUnc \\<nas>\<share>\demo-farm -ContentLocal C:\demo-farm
+.\toggle-root.ps1 -Backing nas   -ContentUnc '\\<nas>\<share>\demo-farm' -ContentLocal C:\demo-farm
+.\toggle-root.ps1 -Backing local -ContentUnc '\\<nas>\<share>\demo-farm' -ContentLocal C:\demo-farm
 .\toggle-compression.ps1 -State on
 .\toggle-compression.ps1 -State off
 ```
