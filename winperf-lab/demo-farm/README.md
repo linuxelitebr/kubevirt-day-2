@@ -7,6 +7,7 @@ What it shows: the response time is almost entirely content delivery (I/O agains
 ## Prerequisites
 
 - A Windows VM (Server 2016+, tested on Server 2022), PowerShell as Administrator.
+- **64-bit PowerShell.** Confirm with `[Environment]::Is64BitProcess` before anything else. In a 32-bit process the ServerManager module is absent (`Install-WindowsFeature` reads as "not recognized" even on Server), the IIS COM objects are unregistered (`Test-Path IIS:\...` fails with `REGDB_E_CLASSNOTREG`), and `System32` silently resolves to `SysWOW64`, so path checks lie to you. Launching `C:\Windows\System32\...\powershell.exe` from a 32-bit shell redirects too: use `C:\Windows\Sysnative\...` or open a fresh window.
 - For the real NAS: the VM joined to the domain, plus a share you can write to (to provision) and read (to serve). A workgroup VM can only run the loopback mode below. See Authentication.
 - Outbound internet on the VM to pull the package, or copy the ZIP in another way.
 
@@ -118,6 +119,10 @@ Set `MemLoadMB` in `app\web.config` above 0 (for example 2000 for 2 GB per site)
 - Write `-Out` to local disk, never to the share under test.
 - Open the dashboard by its URL, not as a local file, or the cross-port fetches are blocked.
 - Error triage: 503 is the app pool down (identity or logon right); 500.19 is the config or credential logon; 500 is the app throwing, and the dashboard shows it in the `err` field.
+- `http=-1` is not the site being down. It means the browser's `fetch` threw, so the site can answer 200 to `curl` and still land here: unreachable origin, or a body the dashboard cannot parse. Check one site directly at `http://localhost:9001/Default.aspx` before blaming CORS or the firewall.
+- Quote the UNC when the share name carries a `$`. Unquoted, PowerShell expands `$name` as a variable and truncates the path without an error.
+- A wrong Connect As credential blocks its own repair: writing the config makes IIS validate the stored one first, so `Set-WebConfigurationProperty` fails before it can fix anything. Clear `userName` and `password` in `applicationHost.config` with `w3svc` and `was` stopped, then set the right one. `0x8007052e` is a logon failure (bad credential), `0x80070005` is access denied (the credential is gone and IIS is reading the share as the machine account, which usually has no grant on a share opened for one person).
+- Write the credential through `-PSPath 'MACHINE/WEBROOT/APPHOST'` with an XPath filter naming the site. `system.applicationHost` is a server-level section, so a site-level `-PSPath` is rejected as locked at a parent level.
 
 ## De-identification
 
