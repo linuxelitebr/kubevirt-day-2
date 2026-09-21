@@ -89,12 +89,19 @@
         try { if (payloadKB > 0) filler = new string('x', payloadKB * 1024); } catch {}
 
         string errSafe = err.Replace("\\", "\\\\").Replace("\"", "'").Replace("\r", " ").Replace("\n", " ");
+
+        // InvariantCulture e' OBRIGATORIO aqui: sem provider, ToString("F1") usa a cultura do SO.
+        // Num Windows pt-BR (ou qualquer locale com virgula decimal) isso emite "io_ms":80,7 -> JSON
+        // INVALIDO, o JSON.parse do dashboard estoura e todo site aparece com http=-1 e metricas vazias,
+        // enquanto curl e o navegador mostram a resposta normalmente (nenhum dos dois faz parse).
+        // Diagnosticado num Server 2022 pt-BR em 2026-09. NAO "simplificar" removendo o provider.
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
         var sb = new StringBuilder();
         sb.Append("{\"fragments\":").Append(k)
           .Append(",\"bytes\":").Append(bytes)
-          .Append(",\"io_ms\":").Append(ioMs.ToString("F1"))
-          .Append(",\"compute_ms\":").Append(cpuMs.ToString("F1"))
-          .Append(",\"scan_ms\":").Append(scanMs.ToString("F1"))
+          .Append(",\"io_ms\":").Append(ioMs.ToString("F1", inv))
+          .Append(",\"compute_ms\":").Append(cpuMs.ToString("F1", inv))
+          .Append(",\"scan_ms\":").Append(scanMs.ToString("F1", inv))
           .Append(",\"leak_mb\":").Append(leakMb)
           .Append(",\"ts\":\"").Append(DateTime.UtcNow.ToString("o")).Append("\"")
           .Append(",\"runtime\":\"").Append(runtime).Append("\"")
