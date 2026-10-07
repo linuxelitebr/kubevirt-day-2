@@ -34,3 +34,9 @@ oc login https://api.<cluster>:6443
 ```bash
 ./vm-hyperv-tuning.sh apply -p ./hyperv-tuning/plan-XXX.csv
 ```
+
+## Notes
+
+- [windows-forklift-tuning.md](windows-forklift-tuning.md): what to add to a Windows VM after a Forklift migration, and why each field.
+- [who-did-what.md](who-did-what.md): finding out who started, stopped or snapshotted a VM, and when.
+- [audit-log-retention.md](audit-log-retention.md): where the audit log lives, why its window is so short, and what you can do about it.
