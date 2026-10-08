@@ -141,7 +141,19 @@ oc get pods -n openshift-logging -w
 
 ## Collector identity
 
-The service account the collector runs as, and the permissions it needs to read each source and write to the store:
+The collector needs an identity and four role bindings. It does not need the roles themselves: `logging-collector-logs-writer`, `collect-application-logs`, `collect-infrastructure-logs` and `collect-audit-logs` all ship with the Logging operator and are created when you install it.
+
+Check before you write them, because most walkthroughs include the definitions and applying them overwrites objects OLM owns. Identical rules today, a conflict at the next operator upgrade:
+
+```bash
+oc get clusterrole logging-collector-logs-writer -o jsonpath='{.metadata.labels}'
+```
+
+```
+{"olm.managed":"true","olm.owner":"cluster-logging.v6.6.1"}
+```
+
+So this is the whole of it, an account and four bindings:
 
 ```bash
 oc apply -f - <<'YAML'
@@ -150,16 +162,6 @@ kind: ServiceAccount
 metadata:
   name: logcollector
   namespace: openshift-logging
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: logging-collector-logs-writer
-rules:
-  - apiGroups: [loki.grafana.com]
-    resourceNames: [logs]
-    resources: [application, audit, infrastructure]
-    verbs: [create]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
