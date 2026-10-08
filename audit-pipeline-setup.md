@@ -349,6 +349,56 @@ Then do something to a virtual machine and go looking for it. Start one, stop it
 
 If the filter is working, the audit tenant is tiny and everything in it is about virtual machines, with a real username in `user.username`. If it is full of service accounts reconciling configmaps, the pipeline is not referencing the filter.
 
+## What breaks on the first run
+
+All of this comes from standing the pipeline up on a cluster that had been running for eighteen days. None of it is a misconfiguration. It is one problem wearing three hats: the collector starts by reading every log file on the node from the beginning, and eighteen days of backlog is more than the defaults expect.
+
+### The collector is OOMKilled
+
+Exit code 137, a few restarts, and the log looks perfectly healthy right up to the end. The default memory limit is 2Gi and chewing through a backlog goes past it.
+
+[The Red Hat article on this](https://access.redhat.com/articles/7089916) raises the limit to 4Gi. The resource is reachable as `obsclf`, which is shorter to type:
+
+```bash
+oc patch obsclf logging -n openshift-logging --type=merge -p '{"spec":{"collector":{"resources":{"limits":{"cpu":"6","memory":"4Gi"},"requests":{"cpu":"500m","memory":"64Mi"}}}}}'
+```
+
+Raise the limit, leave the request where it is. A 64Mi request next to a 4Gi limit looks wrong, and the instinct is to raise it so the pod is not first in line when the kubelet starts evicting. Resist it. The collector is a DaemonSet that tolerates everything, so it runs on every node, and the request is reserved on every node whether it is used or not. A gigabyte of reservation per node to protect against an eviction that happens during one backlog catch-up is a bad trade at fleet scale, which is why the shipped value is what it is.
+
+The pods need recreating to pick up new limits:
+
+```bash
+oc delete pod -n openshift-logging -l app.kubernetes.io/component=collector
+```
+
+### Loki rejects the oldest entries
+
+The distributor says so plainly, once per stream:
+
+```
+msg="write operation failed" details="entry for stream '{...}' has timestamp too old:
+2026-09-19T13:00:05Z, oldest acceptable timestamp is: 2026-10-01T01:54:53Z"
+```
+
+Note the gap. Retention is set to fifteen days and the rejection is at seven, because they are different settings: the second one is `reject_old_samples_max_age` and the LokiStack CRD does not expose it. Raising retention will not help.
+
+This one needs no fix. The rejected entries predate the pipeline, so they were never going to be there, and the errors stop on their own once the collector reaches the present. It is loud while it lasts.
+
+### Ingestion rate limit exceeded
+
+```
+details="ingestion rate limit exceeded for user application (limit: 2097152 bytes/sec)
+while attempting to ingest '1126' lines totaling '2490706' bytes"
+```
+
+Two megabytes per second per tenant, and the catch-up burst goes straight past it. Raise it to get through the first run:
+
+```bash
+oc patch lokistack logging-loki -n openshift-logging --type=merge -p '{"spec":{"limits":{"global":{"ingestion":{"ingestionRate":16,"ingestionBurstSize":32}}}}}'
+```
+
+You can put it back afterwards. Worth noting that the audit tenant hits this too, and that the filter above is what keeps it from happening again: filtered audit is kilobytes and never competes for ingestion bandwidth.
+
 ## Scope and limits
 
 This answers who, from the moment you turn it on. It does not reach backwards: whatever rotated off the node before the collector started is gone.
