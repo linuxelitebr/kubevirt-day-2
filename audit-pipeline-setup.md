@@ -207,7 +207,25 @@ cluster-logging-audit-view
 cluster-logging-infrastructure-view
 ```
 
-This one is worth understanding rather than just fixing, because it produces an error that points at the wrong thing. A cluster administrator can query the gateway perfectly well with no binding at all: the gateway asks Kubernetes whether you may `get` the tenant in `loki.grafana.com`, and a wildcard answers yes. The console's Logs page runs its own narrower check first, finds nothing, and refuses with `Missing permissions to get logs`, which reads like the data is missing when it is sitting right there and answering queries.
+Who needs these is not who you would guess, so it is worth a measurement rather than a rule of thumb:
+
+```bash
+oc auth can-i get audit.loki.grafana.com --as=system:admin
+oc auth can-i get audit.loki.grafana.com --as=someone-else
+```
+
+```
+yes
+no
+```
+
+A cluster administrator already passes, with no binding of any kind, because the gateway asks Kubernetes whether you may `get` the tenant in `loki.grafana.com` and a wildcard answers yes. Anything querying the gateway directly works for them immediately.
+
+The console's Logs page is the part that does not. It runs its own narrower check first, finds no binding, and refuses with `Missing permissions to get logs` even for a cluster administrator, which reads like the data is missing while the data is sitting there answering queries.
+
+So: bind these for the console. The API already allowed it.
+
+A project administrator is a different case and genuinely has nothing. The `admin` role covers a namespace and says nothing about `loki.grafana.com`, and neither does `system:authenticated`. They need a binding, and for application logs it should be the namespaced one below.
 
 Bind to a group, not to a person. A binding per user is a thing you will forget to remove, and the first time someone else needs to look you will do it again rather than fix it:
 
