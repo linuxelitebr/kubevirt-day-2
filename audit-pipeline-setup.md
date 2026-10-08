@@ -334,6 +334,11 @@ spec:
                   - virtualmachinesnapshots
                   - virtualmachinerestores
           - level: None
+  inputs:
+    - name: kube-audit
+      type: audit
+      audit:
+        sources: [kubeAPI]
   pipelines:
     - name: apps
       inputRefs: [application]
@@ -344,11 +349,33 @@ spec:
       filterRefs: [multiline]
       outputRefs: [default-lokistack]
     - name: audit-logs
-      inputRefs: [audit]
+      inputRefs: [kube-audit]
       filterRefs: [vm-activity]
       outputRefs: [default-lokistack]
 YAML
 ```
+
+### The audit input is four things, not one
+
+`audit` collects from four sources and `kubeAPIAudit` only touches one of them. Everything else passes through whole, which is why the pipeline above names an input rather than using the built-in:
+
+```yaml
+  inputs:
+    - name: kube-audit
+      type: audit
+      audit:
+        sources: [kubeAPI]
+```
+
+Measured after the filter was in place and before the input was narrowed: six `kubeAPI` records in ten minutes against forty seven from `auditd`. The filter was working perfectly and the tenant was still mostly something else.
+
+The other three are not noise in general, they are noise *here*, and each answers a question this document is not asking:
+
+- **auditd** is the Linux audit daemon on the node: syscalls, file access, process execution, SELinux denials. It is where you look when the question is about the host rather than the API, and it is the only one of the four that sees anything a person did without going through Kubernetes.
+- **openshiftAPI** covers the OpenShift API server and, in practice, the OAuth one as well. On a running cluster it carries `oauthaccesstokens`, `tokenreviews` and `users`, which is to say who logged in and when. That pairs well with who did what, as a separate question.
+- **ovn** is the OVN-Kubernetes ACL audit log, which records packets a NetworkPolicy allowed or denied. It is empty unless ACL logging is turned on for a policy, and it is the log that answers why a virtual machine cannot reach something.
+
+So narrow the input for this pipeline, and if you want the rest, add a second pipeline with the full `audit` input going wherever your retention and compliance requirements point. They are not in competition: one is a feature, the other is a record.
 
 ### Why each rule
 
@@ -433,7 +460,22 @@ Then do something to a virtual machine and go looking for it. Start one, stop it
 {log_type="audit"} |= "virtualmachines"
 ```
 
-If the filter is working, the audit tenant is tiny and everything in it is about virtual machines, with a real username in `user.username`. If it is full of service accounts reconciling configmaps, the pipeline is not referencing the filter.
+The records are enveloped, which trips up the first attempt at parsing them. The top level keys are `@timestamp`, `hostname`, `kubernetes`, `level`, `log_source`, `log_type`, `message` and `openshift`, and for a `kubeAPI` record the audit event's own fields sit alongside them: `user`, `verb`, `objectRef`, `requestReceivedTimestamp`. An `auditd` record has none of those and carries `audit.linux` instead, so a parser that assumes every line is a Kubernetes audit event reads nulls and concludes nothing arrived. Filter on `log_source` first.
+
+A working pipeline looks like this, from a real run where a virtual machine was created, started with virtctl, started again from the console, snapshotted and torn down:
+
+```
+02:25:32  admin  create  virtualmachines           ns=vmtest
+02:25:33  admin  update  virtualmachines/start     ns=vmtest
+02:25:35  admin  create  virtualmachinesnapshots   ns=vmtest
+02:25:35  admin  patch   virtualmachines           ns=vmtest
+02:25:35  admin  update  virtualmachines/stop      ns=vmtest
+02:25:38  admin  delete  virtualmachinesnapshots   ns=vmtest
+```
+
+Note that the two ways of stopping a machine arrive as different records. The subresource call and the patch are both there, which is the thing the filter would have missed without the `subresources.kubevirt.io` block.
+
+For scale: on the cluster this was measured on, the audit stream went from 4.26 MB per minute to 3.1 KB per minute, which is about 1400 to 1. It stopped being a cost and stopped competing for ingestion bandwidth at the same time.
 
 ## What breaks on the first run
 
