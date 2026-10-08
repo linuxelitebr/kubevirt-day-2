@@ -209,21 +209,43 @@ cluster-logging-infrastructure-view
 
 This one is worth understanding rather than just fixing, because it produces an error that points at the wrong thing. A cluster administrator can query the gateway perfectly well with no binding at all: the gateway asks Kubernetes whether you may `get` the tenant in `loki.grafana.com`, and a wildcard answers yes. The console's Logs page runs its own narrower check first, finds nothing, and refuses with `Missing permissions to get logs`, which reads like the data is missing when it is sitting right there and answering queries.
 
+Bind to a group, not to a person. A binding per user is a thing you will forget to remove, and the first time someone else needs to look you will do it again rather than fix it:
+
 ```bash
-oc create clusterrolebinding logs-view-application --clusterrole=cluster-logging-application-view --user=USERNAME
+oc adm groups new log-readers alice bob
 ```
 
 ```bash
-oc create clusterrolebinding logs-view-infrastructure --clusterrole=cluster-logging-infrastructure-view --user=USERNAME
+oc create clusterrolebinding logs-view-application --clusterrole=cluster-logging-application-view --group=log-readers
 ```
 
 ```bash
-oc create clusterrolebinding logs-view-audit --clusterrole=cluster-logging-audit-view --user=USERNAME
+oc create clusterrolebinding logs-view-infrastructure --clusterrole=cluster-logging-infrastructure-view --group=log-readers
 ```
 
-The last one is the one that matters if you came here for the audit trail. It is also the answer to "what does someone need in order to see who did what": `cluster-logging-audit-view`, and nothing else. Anything reading on a person's behalf passes their token to the gateway, so a user without that role gets a 403 and sees nothing, which is the behaviour you want.
+```bash
+oc create clusterrolebinding logs-view-audit --clusterrole=cluster-logging-audit-view --group=log-readers
+```
 
-Bind to a group rather than a user if more than one person is going to ask.
+With an identity provider that supplies groups, use the group it supplies and skip the first command.
+
+### Application logs can be narrower than this
+
+A cluster-wide binding is the blunt version. Application logs are tenanted by namespace, so a RoleBinding inside a namespace gives a team its own logs and nothing else, which is what the console suggests when it refuses:
+
+```bash
+oc create rolebinding view-application-logs -n THEIR-NAMESPACE --clusterrole=cluster-logging-application-view --group=their-team
+```
+
+That is the right shape for anyone who is not running the cluster.
+
+### Audit cannot be narrowed, and that is the point
+
+There is no namespace dimension to an audit trail. It records what every identity did everywhere, so `cluster-logging-audit-view` is all or nothing, and the console only ever offers namespace scoping for application logs.
+
+Decide that deliberately. The role that answers "who stopped my virtual machine" is the same role that answers "what has everyone in this cluster been doing", including people whose work has nothing to do with whoever is asking. Give it to the people who run the cluster, and do not hand it out to a tenant because they asked a reasonable question about their own machine.
+
+The practical consequence, if you are wiring this into a tool: anything that reads the audit trail on a person's behalf passes their token, so a namespace-scoped user gets a 403 and sees nothing. That is correct behaviour, and it means attribution is a feature for operators rather than for everyone.
 
 ## The forwarder, with the filter that makes this affordable
 
