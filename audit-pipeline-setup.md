@@ -437,6 +437,69 @@ This rolls the kube-apiserver, node by node. On a single node cluster that is a 
 oc get kubeapiserver cluster -o jsonpath='{range .status.conditions[?(@.type=="NodeInstallerProgressing")]}{.reason}{": "}{.message}{"\n"}{end}'
 ```
 
+### On a hosted cluster the API server is somewhere else
+
+A hosted control plane runs as pods in a management cluster, so none of the commands above land where you expect. The field moves, the watch command does not exist, and the obvious guess is wrong in a way that costs you the setting rather than just failing.
+
+The audit configuration appears in three places and only one of them is yours to write. `HostedCluster.spec.configuration.apiServer.audit` on the management cluster is the source. The `HostedControlPlane` in the hosted control plane namespace carries the same field, which is why most people find it first, and the guest's own `APIServer` resource carries it too. Both are copies, rewritten on every reconcile:
+
+```go
+if hcluster.Spec.Configuration != nil {
+    hcp.Spec.Configuration = hcluster.Spec.Configuration.DeepCopy()
+} else {
+    hcp.Spec.Configuration = nil
+}
+```
+
+Note the `else`. Editing a copy while the `HostedCluster` carries no configuration of its own does not revert to the previous value, it clears it.
+
+The block goes under `spec.configuration` on the `HostedCluster`, on the management cluster:
+
+```yaml
+spec:
+  configuration:
+    apiServer:
+      audit:
+        profile: Default
+        customRules:
+        - group: system:serviceaccounts
+          profile: Default
+        - group: system:authenticated
+          profile: WriteRequestBodies
+```
+
+Same ordering rule as above, for the same reason. `profile` and `customRules` are the only fields accepted here, the webhook form is not one of them.
+
+To check it landed, from the guest, where you are probably already working:
+
+```bash
+oc get apiserver cluster -o jsonpath='{.spec.audit}{"\n"}'
+```
+
+That reads a copy, so it tells you the setting reached the guest and nothing more, which is still the fastest way to catch a typo. For what the API server actually loaded, the management cluster holds the rendered policy and the profile name as plain text:
+
+```bash
+oc get cm kas-audit-config -n <hostedcluster-namespace>-<name> -o jsonpath='{.data.profile}{"\n"}'
+```
+
+The `oc get kubeapiserver cluster` command above does not work on a guest at all. That resource belongs to the cluster-kube-apiserver-operator, which a hosted cluster does not run. Watch the rollout on the management cluster instead:
+
+```bash
+oc rollout status deploy/kube-apiserver -n <hostedcluster-namespace>-<name>
+```
+
+The rollout is gentler here than on a single node cluster. `controllerAvailabilityPolicy` defaults to `HighlyAvailable` and the deployment rolls at 25 percent unavailable, so there is no window without an API. A cluster created with `SingleReplica` has one, and the field is immutable, so that is not a decision you get to revisit while you are standing there.
+
+One more difference, before anyone goes looking for files on a node. A hosted control plane runs its API server with `audit-log-maxsize` of 10 and `audit-log-maxbackup` of 1, against 200 and 10 on a standalone cluster, so roughly 20 MB on disk instead of a couple of gigabytes. A sidecar tails the file to stdout continuously, which is what makes that survivable, but it also means there is no on-disk window worth going back to. Shipping is the only path.
+
+Because the control plane is not on the guest's nodes, confirm the collector is actually seeing API server records there before leaning on the rest of this document:
+
+```
+sum by (log_source) (count_over_time({log_type="audit"} | json [1h]))
+```
+
+`log_source` is a field rather than a stream label, which is why that needs the `json` parser. `kubeAPI` in the result is the one that matters here; `auditd` and `ovn` come from the nodes and show up either way.
+
 ### The forwarder decides what leaves
 
 The collector deletes bodies on any rule at `Metadata`. That is not an inference, it is in the Vector configuration the operator generates:
