@@ -53,7 +53,45 @@ stringData:
 YAML
 ```
 
-The endpoint needs its scheme. Leaving `https://` off is the single most common way this fails, and the error it produces does not say so.
+The endpoint needs its scheme. Leaving it off is the single most common way this fails, and the error it produces does not say so.
+
+### If your storage lives in the same cluster
+
+MinIO running beside Loki is the usual lab arrangement, and it comes with a trap. MinIO gets exposed through a Route, the Route is the obvious address, and Loki then fails like this:
+
+```
+msg="error running loki" err="init compactor: failed to init delete store:
+Get \"https://s3-minio.apps.example.com/loki/index/...\":
+tls: failed to verify certificate: x509: certificate signed by unknown authority"
+```
+
+Two things are going on. The Route has no TLS termination of its own, and the OpenShift router answers 443 for any host with the default wildcard certificate, so the handshake succeeds against a certificate Loki has no reason to trust. Meanwhile `storage.tls.caName` is usually set to `openshift-service-ca.crt`, which signs certificates for `*.svc` and has nothing to do with an address on `*.apps`. Different signer, and the one that is configured is not the one being presented.
+
+You can go and fetch the ingress CA. It is already sitting in `openshift-config-managed/default-ingress-cert`, so at least you do not have to scrape it off the endpoint. But do not.
+
+Point Loki at the Service instead:
+
+```yaml
+  endpoint: http://minio-api.minio-ocp.svc.cluster.local:9000
+```
+
+Loki and MinIO are neighbours. Sending their traffic out to the ingress and back in is a detour that invents the certificate problem, adds a router hop to every object operation, and puts all of your object storage traffic through the edge. Inside the cluster there is nothing to verify, so drop `storage.tls` entirely.
+
+Check what the service actually speaks before assuming, because some MinIO deployments do serve TLS on 9000:
+
+```bash
+oc run tlscheck --image=registry.access.redhat.com/ubi9/ubi-minimal --restart=Never --rm -i --quiet -- curl -s -o /dev/null -w "%{http_code}\n" http://minio-api.minio-ocp.svc.cluster.local:9000/minio/health/live
+```
+
+A secret edited after the fact does not reach the running pods on its own:
+
+```bash
+oc delete pod -n openshift-logging -l app.kubernetes.io/instance=logging-loki
+```
+
+For production the same reasoning gives a better answer rather than a different one. Annotate the MinIO service with `service.beta.openshift.io/serving-cert-secret-name`, mount the result, and the endpoint becomes `https://minio-api.minio-ocp.svc.cluster.local:9000`. At that point `openshift-service-ca.crt` is exactly the right CA, because now it really is a `*.svc` certificate. The setting most people already have was never wrong; it was pointed at the wrong address.
+
+One more suspect if it still fails after this, with a complaint about the bucket or the signature: MinIO wants path style addressing rather than bucket-as-subdomain. The operator usually works this out from a non-AWS endpoint, so it is the second thing to check, not the first.
 
 ## LokiStack
 
