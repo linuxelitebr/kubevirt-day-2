@@ -193,6 +193,38 @@ subjects: [{kind: ServiceAccount, name: logcollector, namespace: openshift-loggi
 YAML
 ```
 
+## Reader access
+
+Everything above is about writing. Reading is a separate set of roles, they ship with the operator, and on a fresh install nothing is bound to them:
+
+```bash
+oc get clusterrole | grep 'cluster-logging-.*-view'
+```
+
+```
+cluster-logging-application-view
+cluster-logging-audit-view
+cluster-logging-infrastructure-view
+```
+
+This one is worth understanding rather than just fixing, because it produces an error that points at the wrong thing. A cluster administrator can query the gateway perfectly well with no binding at all: the gateway asks Kubernetes whether you may `get` the tenant in `loki.grafana.com`, and a wildcard answers yes. The console's Logs page runs its own narrower check first, finds nothing, and refuses with `Missing permissions to get logs`, which reads like the data is missing when it is sitting right there and answering queries.
+
+```bash
+oc create clusterrolebinding logs-view-application --clusterrole=cluster-logging-application-view --user=USERNAME
+```
+
+```bash
+oc create clusterrolebinding logs-view-infrastructure --clusterrole=cluster-logging-infrastructure-view --user=USERNAME
+```
+
+```bash
+oc create clusterrolebinding logs-view-audit --clusterrole=cluster-logging-audit-view --user=USERNAME
+```
+
+The last one is the one that matters if you came here for the audit trail. It is also the answer to "what does someone need in order to see who did what": `cluster-logging-audit-view`, and nothing else. Anything reading on a person's behalf passes their token to the gateway, so a user without that role gets a 403 and sees nothing, which is the behaviour you want.
+
+Bind to a group rather than a user if more than one person is going to ask.
+
 ## The forwarder, with the filter that makes this affordable
 
 The `kubeAPIAudit` filter is a real Kubernetes audit policy running inside the collector. It decides what gets shipped, not what gets written, so the API server keeps its complete log on disk and you lose no forensic coverage by narrowing this.
@@ -340,6 +372,20 @@ Something arriving in each tenant, in GB over the last day:
 ```
 sum by (tenant) (increase(loki_distributor_bytes_received_total[24h])) / 1073741824
 ```
+
+If the console says you have no permission, check the data path directly before believing it. Forward the gateway:
+
+```bash
+oc port-forward -n openshift-logging svc/logging-loki-gateway-http 18080:8080
+```
+
+Then ask it yourself, with the tenant in the path and a range query, because a log selector is not valid as an instant query and the error says so in a way that sounds like something else:
+
+```bash
+curl -sk -H "Authorization: Bearer $(oc whoami -t)" -G --data-urlencode 'query={log_type=~".+"}' --data-urlencode 'limit=2' --data-urlencode "start=$(( $(date +%s) - 3600 ))000000000" --data-urlencode "end=$(date +%s)000000000" https://127.0.0.1:18080/api/logs/v1/audit/loki/api/v1/query_range
+```
+
+The service speaks TLS, so `http://` to it answers `Client sent an HTTP request to an HTTPS server`, which is at least unambiguous. A `status: success` with streams in it means the pipeline is fine and the console is the problem, which sends you to the reader roles above rather than to the collector.
 
 Then do something to a virtual machine and go looking for it. Start one, stop it, and query the audit tenant in Observe, Logs:
 
