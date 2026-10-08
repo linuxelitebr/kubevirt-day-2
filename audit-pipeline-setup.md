@@ -265,6 +265,28 @@ Decide that deliberately. The role that answers "who stopped my virtual machine"
 
 The practical consequence, if you are wiring this into a tool: anything that reads the audit trail on a person's behalf passes their token, so a namespace-scoped user gets a 403 and sees nothing. That is correct behaviour, and it means attribution is a feature for operators rather than for everyone.
 
+## Decide what you are keeping before you filter anything
+
+The filter below is narrow on purpose and it is not the right answer everywhere. Work out which of these you want first, because the wrong one costs either money or your audit trail.
+
+**Measure the proportion.** This is the number the decision turns on:
+
+```
+sum by (tenant) (increase(loki_distributor_bytes_received_total[24h])) / 1073741824
+```
+
+On one cluster measured for this, audit was 0.68 GB a day against 589 GB of infrastructure and 90 GB of application logs. At 0.025% of ingestion, filtering audit saves nothing worth having and costs the record. On another, a quiet single node lab, audit was most of what the collector was pushing and the filter took it from 4.26 MB per minute to 3.1 KB.
+
+Same filter, opposite conclusions. Look at your own number.
+
+**Keep everything.** One pipeline, no filter on the audit input. The full trail is retained, anything querying it works, and you pay the volume. If audit is a rounding error next to your other logs, stop here: this is the right answer and the rest of this section is a distraction.
+
+**Keep only what a tool needs.** One pipeline with the filter below. Cheap, and what you retain is a feed of virtual machine activity rather than an audit trail. Everything else survives only in the API server's own files on the control plane node, which on a busy cluster is a window of hours. Choose this when audit volume is a real problem and compliance is not.
+
+**Keep both.** Two pipelines, one narrow and one whole. They overlap, so virtual machine records arrive twice. That is deduplicable, since every Kubernetes audit record carries a unique `auditID` and 100% of them survive the trip, but it is complexity bought in exchange for a saving that only exists if audit was expensive to begin with.
+
+**A fourth shape, for the common case of wanting the trail without the cost.** Not covered by the filter below, and worth knowing about: 99.3% of the audit stream by bytes, measured, is service accounts reconciling. A filter whose only rule drops `system:serviceaccounts` and `system:nodes` and keeps everything else at `Metadata` preserves every human action on every resource and removes almost all of the volume. That is a real audit trail at a fraction of the size, and it is the shape to reach for when the goal is a quieter bucket rather than a tool.
+
 ## The forwarder, with the filter that makes this affordable
 
 The `kubeAPIAudit` filter is a real Kubernetes audit policy running inside the collector. It decides what gets shipped, not what gets written, so the API server keeps its complete log on disk and you lose no forensic coverage by narrowing this.
