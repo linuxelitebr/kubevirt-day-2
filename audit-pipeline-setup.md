@@ -492,13 +492,88 @@ The rollout is gentler here than on a single node cluster. `controllerAvailabili
 
 One more difference, before anyone goes looking for files on a node. A hosted control plane runs its API server with `audit-log-maxsize` of 10 and `audit-log-maxbackup` of 1, against 200 and 10 on a standalone cluster, so roughly 20 MB on disk instead of a couple of gigabytes. A sidecar tails the file to stdout continuously, which is what makes that survivable, but it also means there is no on-disk window worth going back to. Shipping is the only path.
 
-Because the control plane is not on the guest's nodes, confirm the collector is actually seeing API server records there before leaning on the rest of this document:
+### A guest has no API server audit to collect
+
+Everything above configures what the hosted API server writes. None of it gets a single record to the guest's log store, and no setting on the guest changes that.
+
+The `kubeAPI` audit source is not clever. It is a Vector `file` source with `include = ["/var/log/kube-apiserver/audit.log"]`, read off the node by hostPath. A hosted cluster's workers do not run an API server, so that file is not there, and the collector dutifully reads nothing. Measured on a stock hosted cluster with an untouched forwarder, all four audit sources enabled: 100 records sampled, 100 of them `auditd`, none from the API server. The audit tenant looks healthy, because node auditd is real and arrives, which is exactly what makes this take an afternoon to notice.
+
+Confirm it on your own cluster before building anything:
 
 ```
 sum by (log_source) (count_over_time({log_type="audit"} | json [1h]))
 ```
 
-`log_source` is a field rather than a stream label, which is why that needs the `json` parser. `kubeAPI` in the result is the one that matters here; `auditd` and `ovn` come from the nodes and show up either way.
+`log_source` is a field rather than a stream label, which is why that needs the `json` parser. `auditd` and `ovn` come from the nodes and show up either way. `kubeAPI` is the one that will be missing.
+
+### Why you cannot just point a reader at the management cluster
+
+The obvious reaction is to leave the records where they are and query them where they live. That does not work, and the reason is worth knowing before anyone spends a day on it.
+
+A LokiStack gateway in `openshift-logging` mode authenticates with a TokenReview and authorises with a SubjectAccessReview, both against the API server of the cluster it runs in. Its ClusterRole grants exactly `tokenreviews:create` and `subjectaccessreviews:create` and nothing else. A token minted by the guest is not an identity the management cluster can evaluate, so it is refused before RBAC is even consulted. No binding fixes that, because nothing is missing a permission.
+
+So the records have to come to the guest. Then every reader that already works, with every user's own token, keeps working, and nothing downstream needs to know the cluster is hosted.
+
+### Bringing them over
+
+The hosted API servers can post audit events to a webhook, and HyperShift already wires that up: `HostedCluster.spec.auditWebhook` names a Secret holding a kubeconfig under the key `webhook-kubeconfig`, which is synced into the hosted control plane namespace, mounted at `/etc/kubernetes/auditwebhook`, and turned into `--audit-webhook-config-file` with `--audit-webhook-mode=batch`. It is applied to all four of them, kube-apiserver, openshift-apiserver, oauth-apiserver and oauth-server, so the openshift-apiserver and oauth records come along without extra work. They do not come along as `openshiftAPI`, though. The receiver stamps `log_source = "kubeAPI"` on everything it accepts, so on a hosted cluster all four servers share one `log_source`, and a query filtering `log_source="openshiftAPI"`, which is what those same records answer to on a standalone cluster, finds nothing.
+
+Point that webhook at a `ClusterLogForwarder` receiver running in the hosted control plane namespace, and give that forwarder a `loki` output aimed at the guest's gateway:
+
+```yaml
+spec:
+  serviceAccount:
+    name: hosted-audit-collector
+  inputs:
+    - name: hosted-audit
+      type: receiver
+      receiver:
+        type: http
+        port: 8443
+        http:
+          format: kubeAPIAudit
+  outputs:
+    - name: guest-loki
+      type: loki
+      loki:
+        url: https://<guest-gateway-host>/api/logs/v1/audit
+        authentication:
+          token:
+            from: secret
+            secret:
+              name: guest-audit-writer
+              key: token
+  pipelines:
+    - name: hosted-audit
+      inputRefs: [hosted-audit]
+      outputRefs: [guest-loki]
+```
+
+`serviceAccount` is required, and the account has to exist in the forwarder's own namespace, which here is the hosted control plane namespace on the management cluster. It needs no role bindings: a forwarder whose only input is a receiver skips the `collect-*` authorization check entirely, so the account only has to be there. Leave it out and the apply is refused with `spec.serviceAccount: Required value` before any of the rest is read.
+
+The output is `loki`, not `lokiStack`. The `lokiStack` type resolves an instance in its own cluster, which is the thing the management cluster does not have and does not want. The generic type takes a URL and a bearer token and asks no further questions.
+
+That token belongs to a ServiceAccount on the **guest**, bound to `logging-collector-logs-writer`, which ships with the operator. A guest ServiceAccount is an identity the guest gateway can evaluate, which is the whole point. Read the role before you bind it, though: it grants `create` on `logs` for `application`, `audit` and `infrastructure` alike, and there is no audit-only variant shipped. A token bound to it can write to all three tenants, on a cluster it does not live in. Writing your own ClusterRole naming the `audit` resource and nothing else costs four lines.
+
+### Two things that will bite
+
+**Do not use an `application` input to scrape the sidecar's stdout.** The kube-apiserver pod has an `audit-logs` container tailing the file to stdout, and collecting that container looks like the obvious shortcut. It silently destroys the filter. The `kubeAPIAudit` policy is VRL that opens with `is_string(.auditID) && is_string(.verb)`, and a container record carries the event as a string inside `.message` under `log_type=application`. The guard never matches, the whole policy becomes a no-op, nothing reports an error, and the records land in the `application` tenant. Everything in the section above about buying back volume stops being true, quietly. The `receiver` input does not have this problem: it sets `log_type=audit` and `log_source=kubeAPI`, and the record is flattened to the same top-level shape the file source produces, so the filter and any reader built against a normal cluster work unchanged.
+
+**The receiver has no authentication.** `ReceiverSpec` carries a type, a port and TLS, and the operator never asks Vector to verify a client certificate, so requiring one is not expressible. The kubeconfig's client certificate is offered and ignored. Behind a ClusterIP in the hosted control plane namespace that is mostly acceptable. HyperShift's `same-namespace` NetworkPolicy selects every pod there and permits only same-namespace peers, but policies are additive and HyperShift writes two more that also select every pod and name no ports: one admitting any namespace labelled `network.openshift.io/policy-group: monitoring`, always, and one admitting `policy-group: ingress` when the hosted cluster's routes are served by the management cluster's default ingress controller. So the receiver is also reachable from the monitoring namespaces and the router's. Those are platform namespaces rather than tenant ones, which is why this is still the right place for it, but it is not the sealed room it looks like. Behind a Route it is an open audit sink on the internet. Keep the forwarder and the receiver in the hosted control plane namespace and do not expose them.
+
+### The field marked immutable is not
+
+`spec.auditWebhook` carries a `// +immutable` marker in the API source, which reads like it can only be set when the cluster is created. The marker is a comment. Thirty-two fields in that file carry a real `XValidation` rule of `self == oldSelf`, and this is not one of them, so the API server enforces nothing. Verified against a running cluster with a server-side dry run, which exercises admission and persists nothing:
+
+```bash
+oc patch hostedcluster <name> -n <namespace> --type=merge --dry-run=server -p '{"spec":{"auditWebhook":{"name":"does-not-exist"}}}'
+```
+
+It is accepted. So an existing hosted cluster can be wired up without being rebuilt, which is worth knowing before anyone schedules a rebuild over a code comment.
+
+The operator agrees. It is level triggered, so it acts on a value set after creation: the HostedCluster reconcile copies `spec.auditWebhook` onto the `HostedControlPlane` and re-syncs the secret into the control plane namespace on every pass, and each of the four API server components reads it again every time it renders its deployment. Nothing validates the field on the way in either. Applying it does roll the control plane, so it is a change with a window and not a thing to try on a Friday.
+
+One asymmetry to know before you experiment: that copy has no `else` branch, so removing `spec.auditWebhook` from the `HostedCluster` later does not clear it from the `HostedControlPlane`.
 
 ### The forwarder decides what leaves
 
