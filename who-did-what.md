@@ -22,6 +22,26 @@ oc adm node-logs --role=master --path=kube-apiserver/audit.log | sed 's/^[^ ]* /
 
 Worth knowing why the prefix is there: `--role=master` reads from every control plane node, and the prefix is what tells you which one. On a three-node control plane you may want to keep it rather than throw it away. Split it off into a variable instead of discarding it when you care.
 
+And the trap inside the trap: name the node instead of using `--role`, and there is no prefix at all, because there is nothing to disambiguate. A script that strips the first field works with one form and silently eats the start of every line with the other.
+
+```bash
+oc adm node-logs --role=master --path=kube-apiserver/ | tail -2
+```
+
+```
+node-1.example.com audit-2026-10-08T00-28-39.570.log
+node-1.example.com audit.log
+```
+
+```bash
+oc adm node-logs node-1.example.com --path=kube-apiserver/ | tail -2
+```
+
+```
+audit-2026-10-08T00-28-39.570.log
+audit.log
+```
+
 ## Who touched virtual machines and snapshots
 
 The one you will use most. It drops reads, drops the controllers, and keeps only completed writes by actual people:
