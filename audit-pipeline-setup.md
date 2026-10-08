@@ -413,6 +413,86 @@ verb=patch   group=kubevirt.io               resource=virtualmachines  sub=     
 
 **The last rule is the one that pays for everything.** `level: None` on anything that did not match turns gigabytes a day into kilobytes.
 
+## Capturing a body, and only where you need one
+
+Everything above records metadata: who, when, which object, which verb. That is enough until you hit a record that names something other than what you care about. A snapshot is the case that shows up first: its audit record carries the snapshot's own name, and the machine it was taken from lives in the object's spec, which a metadata record does not have. So "who deleted that snapshot" has no answer, because by the time anyone asks, the snapshot is gone and nothing still holds its name.
+
+The fix needs both halves of the pipeline, and the second half is what keeps it cheap.
+
+### The API server has to capture it
+
+Nothing downstream can add a body that was never written. The collector filter chooses what passes; it does not go back and ask the API server for more. Setting `level: RequestResponse` on a collector rule alone produces records labelled `RequestResponse` with no body in them, which is worse than not working, because it reads as though something stripped them later.
+
+Capturing happens on the `APIServer` resource, and it does not have to be cluster-wide at full price. `customRules` applies a profile per group, first match wins, so service accounts can stay where they are while people get bodies:
+
+```bash
+oc patch apiserver cluster --type=merge -p '{"spec":{"audit":{"profile":"Default","customRules":[{"group":"system:serviceaccounts","profile":"Default"},{"group":"system:authenticated","profile":"WriteRequestBodies"}]}}}'
+```
+
+Order matters and the comment is the rule: a service account is also `system:authenticated`, so it has to match the narrower rule first or it falls through to the second one and you have bought the thing you were avoiding.
+
+This rolls the kube-apiserver, node by node. On a single node cluster that is a short window with no API. Watch it land:
+
+```bash
+oc get kubeapiserver cluster -o jsonpath='{range .status.conditions[?(@.type=="NodeInstallerProgressing")]}{.reason}{": "}{.message}{"\n"}{end}'
+```
+
+### The forwarder decides what leaves
+
+The collector deletes bodies on any rule at `Metadata`. That is not an inference, it is in the Vector configuration the operator generates:
+
+```
+if .level == "Metadata" {
+  del(.responseObject)
+  del(.requestObject)
+}
+```
+
+Which means one rule at `RequestResponse` for snapshots, ahead of the `Metadata` rule that covers everything else, sends exactly one kind of body to the log store and nothing more:
+
+```yaml
+        rules:
+          - level: None
+            userGroups: [system:serviceaccounts, system:nodes]
+          - level: RequestResponse
+            verbs: [create, delete]
+            resources:
+              - group: snapshot.kubevirt.io
+                resources: [virtualmachinesnapshots, virtualmachinerestores]
+          - level: Metadata
+            verbs: [create, update, patch, delete]
+            resources:
+              # ...the groups from the filter above...
+          - level: None
+```
+
+A create carries the object in `requestObject`, a delete in `responseObject`. Read both.
+
+### What it costs, measured
+
+On a cluster where this was done in stages with a baseline taken first:
+
+| | |
+| --- | --- |
+| service account records carrying a body, after | 0 of 1774 |
+| people's records carrying a body, after | 2 of 112, which were the two writes made during the test |
+| audit reaching the log store | 8.1 KB/min, against 29 MB/min of infrastructure logs |
+| API server audit files on the node | still 10 rotated, unchanged |
+
+People are a little over one percent of audit records, so giving them bodies moves almost nothing. Reads stay at metadata on their own: `WriteRequestBodies` is about writes.
+
+### What exposure actually changes
+
+Be precise about this rather than reassuring. The log store receives one new thing: snapshot bodies. Nothing else.
+
+The node's own audit files are where the change is real. They now carry request bodies for human writes against any resource, not only the ones you filter for downstream, because the API server captures before anything selects. Those files are readable by whoever can read node logs, and they rotate in hours. `Secret`, `Route` and `OAuthClient` stay at metadata level whatever the profile says, which is platform behaviour and not something you configured.
+
+If that trade is wrong for your cluster, the honest answer is to leave the profile alone and accept that deletions stay unattributed. The rest of the pipeline works without this.
+
+### Doing it in stages
+
+Both halves change behaviour, and one of them restarts your API server, so change one at a time and keep something to compare against. Capture what the pipeline already answers before touching anything, re-check it after the API server lands, and re-check it again after the filter. When something stops working you want to know which of the two did it, and a baseline is the difference between a diagnosis and a guess.
+
 ## The console plugin, if you want it
 
 This is the part the Cluster Observability Operator provides, and the only part:
