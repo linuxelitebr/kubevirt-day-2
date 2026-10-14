@@ -702,13 +702,13 @@ Seven steps across the two clusters, in this order. The rest of this section exp
 
 | | where | what |
 | --- | --- | --- |
-| 1 | guest | the writer identity: a ServiceAccount, a ClusterRole granting `create` on `audit` and nothing else, and a Secret holding a token that does not expire |
-| 2 | guest | read the gateway host off the route |
-| 3 | management | prove the management cluster can reach that host |
-| 4 | management, in the hosted control plane namespace | a Secret holding the guest's token |
-| 5 | management, in the hosted control plane namespace | the `ClusterLogForwarder`: a `receiver` input and a generic `loki` output pointed at the guest |
-| 6 | management, in the hosted control plane namespace | a Secret holding the webhook kubeconfig, under the key `webhook-kubeconfig` |
-| 7 | management | set `HostedCluster.spec.auditWebhook`, which rolls the hosted API server |
+| 1 | hosted | the writer identity: a ServiceAccount, a ClusterRole granting `create` on `audit` and nothing else, and a Secret holding a token that does not expire |
+| 2 | hosted | read the gateway host off the route |
+| 3 | hosting | prove the hosting cluster can reach that host |
+| 4 | hosting, in `openshift-logging` | a Secret holding the hosted cluster's token |
+| 5 | hosting, in `openshift-logging` | the `ClusterLogForwarder`: a `receiver` input and a generic `loki` output pointed at the hosted cluster |
+| 6 | hosting, in the namespace the `HostedCluster` lives in | a Secret holding the webhook kubeconfig, under the key `webhook-kubeconfig`. HyperShift syncs it into the control plane namespace itself |
+| 7 | hosting | set `HostedCluster.spec.auditWebhook`, which rolls the hosted API server |
 
 Steps 1 and 5 have files in [manifests/](manifests/): `hosted-cluster-audit-writer.yaml` on the guest and `hosted-cluster-forwarder.yaml` on the management cluster. Applying a file beats copying a snippet out of prose.
 
@@ -716,7 +716,15 @@ The order is not arbitrary. The token in step 1 is what step 4 carries, step 4 i
 
 The hosted API servers can post audit events to a webhook, and HyperShift already wires that up: `HostedCluster.spec.auditWebhook` names a Secret holding a kubeconfig under the key `webhook-kubeconfig`, which is synced into the hosted control plane namespace, mounted at `/etc/kubernetes/auditwebhook`, and turned into `--audit-webhook-config-file` with `--audit-webhook-mode=batch`. It is applied to all four of them, kube-apiserver, openshift-apiserver, oauth-apiserver and oauth-server, so the openshift-apiserver and oauth records come along without extra work. They do not come along as `openshiftAPI`, though. The receiver stamps `log_source = "kubeAPI"` on everything it accepts, so on a hosted cluster all four servers share one `log_source`, and a query filtering `log_source="openshiftAPI"`, which is what those same records answer to on a standalone cluster, finds nothing.
 
-Point that webhook at a `ClusterLogForwarder` receiver running in the hosted control plane namespace, and give that forwarder a `loki` output aimed at the guest's gateway. This one is applied on the **management cluster**, in the hosted control plane namespace, which is step 5.
+Point that webhook at a `ClusterLogForwarder` receiver and give that forwarder a `loki` output aimed at the hosted cluster's gateway. This is step 5, and it goes in `openshift-logging` on the hosting cluster, **not** in the control plane namespace, which is the obvious guess and does not work: HyperShift labels those namespaces `pod-security enforce=restricted` and pins `scc.podSecurityLabelSync=false`, while the collector mounts a `hostPath` and sets no `securityContext`, so admission rejects the pod. Running it from `openshift-logging` works because the hosted API server has no egress restriction; every NetworkPolicy selecting it is Ingress only. Check that before assuming it holds in your version:
+
+*From the hosting cluster:*
+
+```bash
+oc get networkpolicy -n <control-plane-namespace> -o custom-columns=NAME:.metadata.name,TYPES:.spec.policyTypes
+```
+
+The fragment below is the part that matters and is not a complete object. [manifests/hosted-cluster-forwarder.yaml](manifests/hosted-cluster-forwarder.yaml) is the whole file with its `apiVersion`, `kind` and `metadata`, which is what you apply.
 
 *Applied on the hosting cluster:*
 
@@ -772,7 +780,20 @@ oc exec -n <hosted-control-plane-namespace> <any-pod> -- curl -sk -o /dev/null -
 
 `302` is the answer you want: the gateway redirects a request carrying no token, which means DNS resolved and the route answered. `000` or a timeout means the management cluster cannot get there, and that is a networking prerequisite to settle before any of the rest of this is worth applying.
 
-`serviceAccount` is required, and the account has to exist in the forwarder's own namespace, which here is the hosted control plane namespace on the management cluster. It needs no role bindings: a forwarder whose only input is a receiver skips the `collect-*` authorization check entirely, so the account only has to be there. Leave it out and the apply is refused with `spec.serviceAccount: Required value` before any of the rest is read.
+`serviceAccount` is required, and the account has to exist in the forwarder's own namespace, which here is `openshift-logging` on the hosting cluster. It needs no role bindings: a forwarder whose only input is a receiver skips the `collect-*` authorization check entirely, so the account only has to be there. Leave it out and the apply is refused with `spec.serviceAccount: Required value` before any of the rest is read. Nothing creates it for you:
+
+*From the hosting cluster:*
+
+```bash
+oc create sa audit-collector -n openshift-logging
+```
+
+That is the second ServiceAccount in this procedure and the two are easy to confuse, because they sit on opposite sides and do opposite jobs:
+
+| | lives on | what it is for | needs RBAC |
+| --- | --- | --- | --- |
+| the writer | the hosted cluster | its **token** is what authenticates the write into that cluster's Loki | yes, `create` on `audit` and nothing more |
+| the collector | the hosting cluster, in `openshift-logging` | only has to exist, so the forwarder passes validation | no bindings at all |
 
 The output is `loki`, not `lokiStack`. The `lokiStack` type resolves an instance in its own cluster, which is the thing the management cluster does not have and does not want. The generic type takes a URL and a bearer token and asks no further questions.
 
@@ -782,7 +803,34 @@ That token belongs to a ServiceAccount on the **guest**, which is step 1 and has
 
 **Do not use an `application` input to scrape the sidecar's stdout.** The kube-apiserver pod has an `audit-logs` container tailing the file to stdout, and collecting that container looks like the obvious shortcut. It silently destroys the filter. The `kubeAPIAudit` policy is VRL that opens with `is_string(.auditID) && is_string(.verb)`, and a container record carries the event as a string inside `.message` under `log_type=application`. The guard never matches, the whole policy becomes a no-op, nothing reports an error, and the records land in the `application` tenant. Everything in the section above about buying back volume stops being true, quietly. The `receiver` input does not have this problem: it sets `log_type=audit` and `log_source=kubeAPI`, and the record is flattened to the same top-level shape the file source produces, so the filter and any reader built against a normal cluster work unchanged.
 
-**The receiver has no authentication.** `ReceiverSpec` carries a type, a port and TLS, and the operator never asks Vector to verify a client certificate, so requiring one is not expressible. The kubeconfig's client certificate is offered and ignored. Behind a ClusterIP in the hosted control plane namespace that is mostly acceptable. HyperShift's `same-namespace` NetworkPolicy selects every pod there and permits only same-namespace peers, but policies are additive and HyperShift writes two more that also select every pod and name no ports: one admitting any namespace labelled `network.openshift.io/policy-group: monitoring`, always, and one admitting `policy-group: ingress` when the hosted cluster's routes are served by the management cluster's default ingress controller. So the receiver is also reachable from the monitoring namespaces and the router's. Those are platform namespaces rather than tenant ones, which is why this is still the right place for it, but it is not the sealed room it looks like. Behind a Route it is an open audit sink on the internet. Keep the forwarder and the receiver in the hosted control plane namespace and do not expose them.
+**The receiver has no authentication, and `openshift-logging` does not protect it either.** `ReceiverSpec` carries a type, a port and TLS, and the operator never asks Vector to verify a client certificate, so requiring one is not expressible. The kubeconfig's client certificate is offered and ignored. An earlier version of this page argued that the hosted control plane namespace made that acceptable, on the strength of HyperShift's NetworkPolicies. That argument does not survive the forwarder living in `openshift-logging`, where those policies do not apply. Measured on a working setup: no NetworkPolicy in that namespace at all, the receiver's Service a plain ClusterIP, no Route. Any pod in the hosting cluster can post audit records into it.
+
+Nothing downstream treats that as a problem, because the records are tagged by the receiver rather than trusted from the sender, but an unauthenticated sink that accepts anything is worth closing rather than explaining. The control plane namespaces carry a label to select them by, so one policy admits the senders and nobody else:
+
+*From the hosting cluster:*
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: audit-receiver
+  namespace: openshift-logging
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/instance: hosted-audit
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              hypershift.openshift.io/hosted-control-plane: "true"
+      ports:
+        - protocol: TCP
+          port: 8443
+```
+
+Whatever you do, do not put a Route in front of it. Behind a Route it is an open audit sink on the internet.
 
 ### The field marked immutable is not
 
