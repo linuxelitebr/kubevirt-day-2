@@ -652,9 +652,25 @@ So the records have to come to the guest. Then every reader that already works, 
 
 ### Bringing them over
 
+Seven steps across the two clusters, in this order. The rest of this section explains each one and why it is shaped the way it is, but the order is the part that matters, because the last step restarts an API server and the ones before it are what make that restart worth doing.
+
+| | where | what |
+| --- | --- | --- |
+| 1 | guest | the writer identity: a ServiceAccount, a ClusterRole granting `create` on `audit` and nothing else, and a Secret holding a token that does not expire |
+| 2 | guest | read the gateway host off the route |
+| 3 | management | prove the management cluster can reach that host |
+| 4 | management, in the hosted control plane namespace | a Secret holding the guest's token |
+| 5 | management, in the hosted control plane namespace | the `ClusterLogForwarder`: a `receiver` input and a generic `loki` output pointed at the guest |
+| 6 | management, in the hosted control plane namespace | a Secret holding the webhook kubeconfig, under the key `webhook-kubeconfig` |
+| 7 | management | set `HostedCluster.spec.auditWebhook`, which rolls the hosted API server |
+
+Steps 1 and 5 have files in [manifests/](manifests/): `hosted-cluster-audit-writer.yaml` on the guest and `hosted-cluster-forwarder.yaml` on the management cluster. Applying a file beats copying a snippet out of prose.
+
+The order is not arbitrary. The token in step 1 is what step 4 carries, step 4 is what step 5 authenticates with, and step 7 sends traffic at something that has to already be listening. Doing 7 first gives you an API server restart and a webhook posting into nothing.
+
 The hosted API servers can post audit events to a webhook, and HyperShift already wires that up: `HostedCluster.spec.auditWebhook` names a Secret holding a kubeconfig under the key `webhook-kubeconfig`, which is synced into the hosted control plane namespace, mounted at `/etc/kubernetes/auditwebhook`, and turned into `--audit-webhook-config-file` with `--audit-webhook-mode=batch`. It is applied to all four of them, kube-apiserver, openshift-apiserver, oauth-apiserver and oauth-server, so the openshift-apiserver and oauth records come along without extra work. They do not come along as `openshiftAPI`, though. The receiver stamps `log_source = "kubeAPI"` on everything it accepts, so on a hosted cluster all four servers share one `log_source`, and a query filtering `log_source="openshiftAPI"`, which is what those same records answer to on a standalone cluster, finds nothing.
 
-Point that webhook at a `ClusterLogForwarder` receiver running in the hosted control plane namespace, and give that forwarder a `loki` output aimed at the guest's gateway:
+Point that webhook at a `ClusterLogForwarder` receiver running in the hosted control plane namespace, and give that forwarder a `loki` output aimed at the guest's gateway. This one is applied on the **management cluster**, in the hosted control plane namespace, which is step 5:
 
 ```yaml
 spec:
@@ -707,7 +723,7 @@ oc exec -n <hosted-control-plane-namespace> <any-pod> -- curl -sk -o /dev/null -
 
 The output is `loki`, not `lokiStack`. The `lokiStack` type resolves an instance in its own cluster, which is the thing the management cluster does not have and does not want. The generic type takes a URL and a bearer token and asks no further questions.
 
-That token belongs to a ServiceAccount on the **guest**, bound to `logging-collector-logs-writer`, which ships with the operator. A guest ServiceAccount is an identity the guest gateway can evaluate, which is the whole point. Read the role before you bind it, though: it grants `create` on `logs` for `application`, `audit` and `infrastructure` alike, and there is no audit-only variant shipped. A token bound to it can write to all three tenants, on a cluster it does not live in. Writing your own ClusterRole naming the `audit` resource and nothing else costs four lines.
+That token belongs to a ServiceAccount on the **guest**, which is step 1 and has to exist before any of this is applied, bound to `logging-collector-logs-writer`, which ships with the operator. A guest ServiceAccount is an identity the guest gateway can evaluate, which is the whole point. Read the role before you bind it, though: it grants `create` on `logs` for `application`, `audit` and `infrastructure` alike, and there is no audit-only variant shipped. A token bound to it can write to all three tenants, on a cluster it does not live in. Writing your own ClusterRole naming the `audit` resource and nothing else costs four lines.
 
 ### Two things that will bite
 
