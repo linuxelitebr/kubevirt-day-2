@@ -300,6 +300,39 @@ oc create clusterrolebinding logs-view-audit --clusterrole=cluster-logging-audit
 
 With an identity provider that supplies groups, use the group it supplies and skip the first command.
 
+### Handing audit to people who are not cluster admins
+
+`cluster-logging-audit-view` is bindable to anything, so a cluster owner can decide that a group of operators gets to see who did what without making them administrators:
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: audit-readers
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-logging-audit-view
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: Group
+    name: <your-group>
+```
+
+Be precise about what that grants, because it is wider than the equivalent in the tools people arrive from. In vSphere, who may see a task follows permission on the object. Here it does not.
+
+The gateway narrows a query to the namespaces a reader may see by injecting a label matcher, and the labels it matches on are `kubernetes_namespace_name` and `k8s_namespace_name`. Container logs carry those. **Audit records do not**, so there is nothing for the matcher to narrow and the records pass whole.
+
+Measured, rather than read off the configuration: a ServiceAccount in none of the admin groups, holding only `cluster-logging-audit-view`, queried the audit tenant and got records back. Reading the matcher in the operator's source suggests the opposite, that such a reader would see nothing. They see everything.
+
+So a group given this role reads the whole cluster's audit, including namespaces they cannot otherwise list. That may be exactly what the cluster owner wants, and it is their call to make, but it should be made knowing which of the two it is.
+
+Three groups skip the narrowing entirely and have this already. You can read them off the running gateway rather than trusting a default:
+
+```bash
+oc get deploy logging-loki-gateway -n openshift-logging -o jsonpath='{range .spec.template.spec.containers[?(@.name=="opa")].args[*]}{@}{"\n"}{end}' | grep admin-groups
+```
+
 ### Application logs can be narrower than this
 
 A cluster-wide binding is the blunt version. Application logs are tenanted by namespace, so a RoleBinding inside a namespace gives a team its own logs and nothing else, which is what the console suggests when it refuses:
