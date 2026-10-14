@@ -1,0 +1,52 @@
+# Runs on the MANAGEMENT cluster, in openshift-logging and NOT in the hosted
+# control plane namespace: HyperShift enforces pod-security `restricted` there
+# and pins the label sync off, while the collector mounts a hostPath and sets no
+# securityContext, so admission rejects it. This works because the hosted
+# kube-apiserver has no egress restriction; every NetworkPolicy selecting it is
+# Ingress only. Check that before assuming it holds in your version.
+apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+  name: hosted-audit
+  namespace: openshift-logging
+  annotations:
+    # Without this the operator builds a DaemonSet, which on a management
+    # cluster is one collector per node for a receiver that needs one. The key
+    # says dev-preview and means it.
+    logging.openshift.io/dev-preview-enable-collector-as-deployment: "true"
+spec:
+  serviceAccount:
+    name: audit-collector
+  inputs:
+    # The hosted API server posts here, via HostedCluster.spec.auditWebhook.
+    # The operator exposes this as a Service named <forwarder>-<input>.
+    - name: hosted-kas-audit
+      type: receiver
+      receiver:
+        type: http
+        port: 8443
+        http:
+          format: kubeAPIAudit
+  outputs:
+    # Type loki, not lokiStack: the target is in ANOTHER cluster, and lokiStack
+    # resolves an instance in this one, which a management cluster does not have.
+    - name: guest-loki
+      type: loki
+      loki:
+        url: https://<GUEST-GATEWAY-ROUTE>/api/logs/v1/audit
+        authentication:
+          token:
+            from: secret
+            secret:
+              name: guest-loki-token
+              key: token
+      # tls sits at the OUTPUT level, a sibling of loki, not inside it. Nested
+      # wrong the operator drops it without a word, verify_certificate is never
+      # written, and the collector retries forever against a certificate signed
+      # by a CA it has no reason to trust.
+      tls:
+        insecureSkipVerify: true
+  pipelines:
+    - name: hosted-audit
+      inputRefs: [hosted-kas-audit]
+      outputRefs: [guest-loki]

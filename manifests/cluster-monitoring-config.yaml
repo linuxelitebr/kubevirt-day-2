@@ -1,0 +1,15 @@
+# Both claims name no storageClassName, so the cluster's default is used.
+# With no default marked they are created with no class and stay Pending,
+# and nothing in the monitoring operator's status points at storage.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-monitoring-config
+  namespace: openshift-monitoring
+data:
+  config.yaml: "alertmanagerMain:\n  volumeClaimTemplate:\n    metadata:\n      name:\
+    \ pvc-alertmanager\n    spec:\n      resources:\n        requests:\n         \
+    \ storage: 10Gi\nprometheusK8s:\n  volumeClaimTemplate:\n    metadata:\n     \
+    \ name: pvc-prometheus\n    spec:\n      resources:\n        requests:\n     \
+    \     storage: 100Gi\nenableUserWorkload: true\n"

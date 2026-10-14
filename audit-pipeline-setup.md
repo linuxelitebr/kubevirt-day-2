@@ -1,5 +1,19 @@
 # Standing up a log pipeline that can answer who did what
 
+## If you have not set Loki up yet
+
+Everything below assumes a log store. If you do not have one, this document is the guide: work through it from the top. The YAML is also available as files under [manifests/](manifests/), because a snippet cannot be applied and a file can.
+
+A dashboard that sends you here is telling you which part is missing, not that nothing works. The sections that answer the common ones:
+
+| what you were told | where to go |
+| --- | --- |
+| audit is not reaching the log store | [the audit input is four things](#the-audit-input-is-four-things-not-one) |
+| you cannot read the audit tenant | [reader access](#reader-access) |
+| deletions have no name attached | [capturing a body](#capturing-a-body-and-only-where-you-need-one) |
+| this is a hosted cluster | [a guest has no API server audit to collect](#a-guest-has-no-api-server-audit-to-collect) |
+| the Loki dashboards are empty | [monitoring](#monitoring-which-the-loki-dashboards-need) |
+
 ## Why this is needed
 
 [who-did-what.md](who-did-what.md) covers the queries that pull a username out of the audit log. [audit-log-retention.md](audit-log-retention.md) covers why those queries only reach back about a day: the API server keeps eleven files of 200 MB on the control plane node and nothing older. If you want an answer about last week, the audit log has to leave the node before it rotates away.
@@ -54,6 +68,45 @@ YAML
 ```
 
 The endpoint needs its scheme. Leaving it off is the single most common way this fails, and the error it produces does not say so.
+
+### If you run ODF, let NooBaa make the bucket
+
+With OpenShift Data Foundation already in the cluster there is no reason to stand MinIO up by hand. An `ObjectBucketClaim` asks NooBaa for a bucket and leaves the credentials in a Secret named after the claim:
+
+```bash
+oc apply -f - <<'YAML'
+apiVersion: objectbucket.io/v1alpha1
+kind: ObjectBucketClaim
+metadata:
+  name: loki
+  namespace: openshift-logging
+spec:
+  generateBucketName: loki
+  storageClassName: openshift-storage.noobaa.io
+YAML
+```
+
+Then build the Loki secret from what it produced, rather than copying values by hand:
+
+```bash
+oc apply -f - <<YAML
+apiVersion: v1
+kind: Secret
+metadata:
+  name: logging-loki-s3
+  namespace: openshift-logging
+stringData:
+  access_key_id: $(oc get secret loki -n openshift-logging -o jsonpath='{.data.AWS_ACCESS_KEY_ID}' | base64 -d)
+  access_key_secret: $(oc get secret loki -n openshift-logging -o jsonpath='{.data.AWS_SECRET_ACCESS_KEY}' | base64 -d)
+  bucketnames: $(oc get obc loki -n openshift-logging -o jsonpath='{.spec.bucketName}')
+  endpoint: https://s3.openshift-storage.svc:443
+  region: us-east-1
+YAML
+```
+
+Note the quoting: that heredoc is unquoted so the command substitutions run, which is the opposite of every other one in this document. Getting it backwards writes the literal text into the secret and Loki fails with credentials that are the shell script itself.
+
+A dedicated backing store is worth it if you care about capping what Loki can consume. A `pv-pool` backing store bounded to a size you choose gives you a ceiling; the RGW backend has no simple equivalent.
 
 ### If your storage lives in the same cluster
 
@@ -630,6 +683,67 @@ If that trade is wrong for your cluster, the honest answer is to leave the profi
 ### Doing it in stages
 
 Both halves change behaviour, and one of them restarts your API server, so change one at a time and keep something to compare against. Capture what the pipeline already answers before touching anything, re-check it after the API server lands, and re-check it again after the filter. When something stops working you want to know which of the two did it, and a baseline is the difference between a diagnosis and a guess.
+
+## Monitoring, which the Loki dashboards need
+
+The console's Logs view reads from Loki, but the dashboards that show how Loki itself is doing read from Prometheus. If those are empty while logs are fine, the log store is not the problem.
+
+Two things are needed. The namespace has to be in scope for the platform monitoring stack:
+
+```bash
+oc label namespace openshift-logging openshift.io/cluster-monitoring=true
+```
+
+A namespace created by hand does not carry that label, and nothing complains about its absence. The symptom is a dashboard with no datapoints, which reads as a Loki problem and is not one.
+
+And monitoring needs somewhere to keep its own data, which is also where user workload monitoring gets turned on:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cluster-monitoring-config
+  namespace: openshift-monitoring
+data:
+  config.yaml: |
+    enableUserWorkload: true
+    alertmanagerMain:
+      volumeClaimTemplate:
+        metadata:
+          name: pvc-alertmanager
+        spec:
+          resources:
+            requests:
+              storage: 10Gi
+    prometheusK8s:
+      volumeClaimTemplate:
+        metadata:
+          name: pvc-prometheus
+        spec:
+          resources:
+            requests:
+              storage: 100Gi
+```
+
+### The claim with no storage class
+
+Those templates name no `storageClassName` on purpose, so each cluster uses whatever it already treats as default. That only works if the cluster has one:
+
+```bash
+oc get sc -o custom-columns=NAME:.metadata.name,DEFAULT:.metadata.annotations.storageclass\.kubernetes\.io/is-default-class
+```
+
+With no default, both claims are created with no class at all and sit `Pending` forever. Nothing in the monitoring operator's status points at storage, and the obvious reading is that monitoring is broken.
+
+Marking a default fixes it, and fixes it for everything created afterwards rather than one claim at a time:
+
+```bash
+oc patch storageclass <your-class> -p '{"metadata":{"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+```
+
+Claims already stuck recover on their own: the volume controller keeps retrying unbound claims and picks up the default once it exists. If one does not, note that a claim's `storageClassName` can be set when it was never set, but not changed once it holds a value, so a claim created against a class that does not exist has to be deleted rather than edited.
+
+Pinning the class explicitly in the template works too, and is the better choice when the cluster has several and the default is not the one you want Prometheus on.
 
 ## The console plugin, if you want it
 

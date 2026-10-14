@@ -1,0 +1,191 @@
+# Collector identity, RBAC and the ClusterLogForwarder.
+# The logging-collector-logs-writer binding is the one the Loki GATEWAY
+# checks. Without it the gateway answers 403 and the collector drops every
+# record, while the ClusterLogForwarder still reports Ready. Nothing in any
+# status says so; only the collector's own log does.
+
+kind: ServiceAccount
+apiVersion: v1
+metadata:
+  name: logcollector
+  namespace: openshift-logging
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logging-collector-logs-writer
+rules:
+- apiGroups:
+  - loki.grafana.com
+  resourceNames:
+  - logs
+  resources:
+  - application
+  - audit
+  - infrastructure
+  verbs:
+  - create
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: logging-collector-logs-writer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: logging-collector-logs-writer
+subjects:
+- kind: ServiceAccount
+  name: logcollector
+  namespace: openshift-logging
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: collect-application-logs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: collect-application-logs
+subjects:
+- kind: ServiceAccount
+  name: logcollector
+  namespace: openshift-logging
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: collect-infrastructure-logs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: collect-infrastructure-logs
+subjects:
+- kind: ServiceAccount
+  name: logcollector
+  namespace: openshift-logging
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: collect-audit-logs
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: collect-audit-logs
+subjects:
+- kind: ServiceAccount
+  name: logcollector
+  namespace: openshift-logging
+---
+apiVersion: observability.openshift.io/v1alpha1
+kind: UIPlugin
+metadata:
+  name: logging
+spec:
+  type: Logging
+  logging:
+    lokiStack:
+      name: logging-loki
+    logsLimit: 50
+    timeout: 30s
+---
+apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+  name: logging
+  namespace: openshift-logging
+spec:
+  collector:
+    tolerations:
+    - operator: Exists
+  managementState: Managed
+  outputs:
+  - lokiStack:
+      authentication:
+        token:
+          from: serviceAccount
+      target:
+        name: logging-loki
+        namespace: openshift-logging
+    name: default-lokistack
+    tls:
+      ca:
+        configMapName: openshift-service-ca.crt
+        key: service-ca.crt
+    type: lokiStack
+  filters:
+  - name: multiline
+    type: detectMultilineException
+  pipelines:
+  - inputRefs:
+    - application
+    name: apps
+    filterRefs:
+    - multiline
+    outputRefs:
+    - default-lokistack
+  - inputRefs:
+    - infrastructure
+    name: infrastructure-logs
+    filterRefs:
+    - multiline
+    outputRefs:
+    - default-lokistack
+  - inputRefs:
+    - audit
+    name: audit-logs
+    filterRefs:
+    - multiline
+    outputRefs:
+    - default-lokistack
+  serviceAccount:
+    name: logcollector
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-logging-application-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-logging-application-view
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: system:cluster-admins
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: cluster-admin
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-logging-infrastructure-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-logging-infrastructure-view
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: system:cluster-admins
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: cluster-admin
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cluster-logging-audit-view
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-logging-audit-view
+subjects:
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: system:cluster-admins
+- apiGroup: rbac.authorization.k8s.io
+  kind: Group
+  name: cluster-admin
