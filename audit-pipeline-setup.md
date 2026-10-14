@@ -714,6 +714,7 @@ That is the whole value for the `url` above, with `https://` in front and `/api/
 Reading the name is the easy half. The forwarder runs on the management cluster, and nothing says the management cluster can resolve a hostname served by the guest's ingress. In a lab where one cluster's wildcard sits under the other's it works by accident; between two clusters that share no DNS it does not, and the symptom is a collector retrying forever while the ClusterLogForwarder reports itself healthy. Check it from inside the management cluster, not from your laptop:
 
 ```bash
+# oc get hcp -A
 oc exec -n <hosted-control-plane-namespace> <any-pod> -- curl -sk -o /dev/null -w '%{http_code}\n' --max-time 15 https://<guest-gateway-host>/api/logs/v1/audit/loki/api/v1/labels
 ```
 
