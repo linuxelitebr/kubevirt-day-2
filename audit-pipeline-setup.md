@@ -415,11 +415,19 @@ spec:
       kubeAPIAudit:
         omitStages:
           - RequestReceived
+        omitResponseCodes: [404, 429]
         rules:
           - level: None
             userGroups:
               - system:serviceaccounts
               - system:nodes
+          - level: RequestResponse
+            verbs: [create, delete]
+            resources:
+              - group: snapshot.kubevirt.io
+                resources:
+                  - virtualmachinesnapshots
+                  - virtualmachinerestores
           - level: Metadata
             verbs: [create, update, patch, delete]
             resources:
@@ -433,10 +441,13 @@ spec:
                   - virtualmachines/start
                   - virtualmachines/stop
                   - virtualmachines/restart
-                  - virtualmachines/pause
-                  - virtualmachines/unpause
                   - virtualmachines/migrate
-                  - virtualmachines/softreboot
+                  - virtualmachineinstances/pause
+                  - virtualmachineinstances/unpause
+                  - virtualmachineinstances/softreboot
+                  - virtualmachineinstances/reset
+                  - virtualmachineinstances/addvolume
+                  - virtualmachineinstances/removevolume
               - group: snapshot.kubevirt.io
                 resources:
                   - virtualmachinesnapshots
@@ -462,6 +473,26 @@ spec:
       outputRefs: [default-lokistack]
 YAML
 ```
+
+### Three things in that filter that are easy to get wrong
+
+**Pause, unpause and softreboot are not virtual machine subresources.** They look like they should be, and an audit policy naming `virtualmachines/pause` is accepted without complaint, matches nothing, and falls through to the catch-all that drops the record. Ask the cluster rather than guessing:
+
+```bash
+oc get --raw /apis/subresources.kubevirt.io/v1 | python3 -c "import sys,json;print(sorted({r['name'] for r in json.load(sys.stdin)['resources']}))"
+```
+
+At the time of writing a virtual machine has `start`, `stop`, `restart`, `migrate`, `expand-spec`, `objectgraph` and `evacuate/cancel`, and nothing else. Pause, unpause, softreboot, reset and volume hotplug live on the instance, so the rule has to name `virtualmachineinstances/pause` and friends. A filter that names the wrong half silently hides those actions.
+
+**`omitResponseCodes` has a default you did not write.** Leave the field out and the operator compiles in `[404, 409, 422, 429]`, which you can read back off the running collector:
+
+```bash
+oc get cm logging-config -n openshift-logging -o jsonpath='{.data.vector\.toml}' | grep -n 'responseStatus.code'
+```
+
+404 and 429 are noise worth dropping. 409 and 422 are not: a start on a machine that is already running answers 409, and an edit a webhook rejects answers 422. Both are someone trying to do something and being told no, which is the interesting half of an audit trail. 403 is not in the default list, so refusals for lack of permission survive either way. Setting the field explicitly to `[404, 429]` keeps the noise out and the refusals in.
+
+**A snapshot deletion only carries the machine's name in the response.** A delete request body is `DeleteOptions`, which names nothing, so the deleted object appears in the response body and nowhere else. That is why snapshots get their own `RequestResponse` rule rather than riding along at `Metadata`: without it you can see that a snapshot was deleted and never learn which machine it belonged to, because by then nothing holds its name. Restores are in the same rule for symmetry, though their spec names a `target` rather than a `source`, so the same trick does not work on them.
 
 ### The audit input is four things, not one
 
