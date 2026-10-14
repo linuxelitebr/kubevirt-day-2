@@ -6,11 +6,15 @@ Commands, in order, with the cluster each one runs on. The reasons are in [audit
 
 **What it does not:** standing up the log store. That is operators, a bucket and a storage class, and it is written up properly in [Operators](audit-pipeline-setup.md#operators), [Object storage](audit-pipeline-setup.md#object-storage) and [LokiStack](audit-pipeline-setup.md#lokistack). Step 0 below tells you whether you already have it.
 
-Every block says which cluster it runs on. Check before each one, because both clusters in a hosted setup have an `openshift-logging` namespace and a `ClusterLogForwarder`, so the wrong context answers plausibly instead of erroring:
+**This page assumes you applied the files in [manifests/](manifests/) without renaming anything.** Two commands below hard-code a name derived from those files: the Vector sink is named after the forwarder's output, and the receiver's Service after the forwarder plus its input. If you renamed either, derive yours instead of pasting mine, and the step says how.
+
+Every block says which cluster it runs on, and getting that wrong is the most common way to waste an hour here: both clusters in a hosted setup have an `openshift-logging` namespace and a `ClusterLogForwarder`, so the wrong context answers plausibly instead of erroring. `oc whoami --show-server` tells them apart only if the two have different hostnames, which a NodePort-exposed guest does not. The reliable check is which one knows about hosted clusters:
 
 ```bash
-oc whoami --show-server
+oc get hc -A
 ```
+
+It lists your hosted clusters on the hosting cluster, and answers `error: the server doesn't have a resource type "hc"` anywhere else.
 
 ## Step 1: identify your clusters
 
@@ -23,7 +27,7 @@ oc get infrastructure cluster -o jsonpath='{.status.controlPlaneTopology}{"\n"}'
 `External` means that cluster is a **hosted cluster**: its API server runs as pods somewhere else and writes its audit there. Anything else, `SingleReplica` or `HighlyAvailable`, means the control plane is that cluster's own.
 
 - Nothing answers `External`: you have an ordinary cluster. Do **A** on it and stop.
-- One answers `External`: that is the hosted cluster. Do **A** on it, then **B** on the cluster running its control plane, which is the hosting cluster.
+- One answers `External`: that is the hosted cluster. Do **A** on it, then **B** on the cluster running its control plane, which is the hosting cluster. To find that one, run `oc get hc -A` on each cluster you have: it lists your hosted cluster by name only on the hosting cluster.
 
 Do not try to tell them apart by which one has virtual machines. With HyperShift on KubeVirt the hosting cluster runs the guest's nodes as virtual machines, and often others of its own, so `oc get vm` answers on both.
 
@@ -44,10 +48,10 @@ oc auth can-i get 'audit.loki.grafana.com/logs'
 `yes` means you can read the audit tenant. `no` means [Reader access](audit-pipeline-setup.md#reader-access) first, and note a cluster admin passes with no binding while everyone else needs one.
 
 ```bash
-oc get clusterlogforwarder -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'
+oc get clusterlogforwarder -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{range .spec.pipelines[*]}{"\n    in="}{.inputRefs}{" out="}{.outputRefs}{end}{"\n"}{end}'
 ```
 
-A forwarder has to exist and carry an `audit` input. If it does not, [the forwarder section](audit-pipeline-setup.md#the-forwarder-with-the-filter-that-makes-this-affordable) has the whole file.
+One of the pipelines has to take an `audit` input. Note the output name it sends to: the checks further down are written for an output called `default-lokistack`, which is what the shipped file uses. If yours is named something else, substitute it there. If no forwarder carries audit at all, [the forwarder section](audit-pipeline-setup.md#the-forwarder-with-the-filter-that-makes-this-affordable) has the whole file.
 
 ## A. On the cluster with the virtual machines
 
@@ -225,8 +229,11 @@ oc patch hostedcluster <HC-NAME> -n <HC-NAMESPACE> --type=merge -p '{"spec":{"au
 ```
 
 ```bash
+[ -n "$GEN" ] || echo 'GEN is unset: the three B7 commands have to run in the same shell'
 until [ "$(oc get deploy kube-apiserver -n <CP-NAMESPACE> -o jsonpath='{.metadata.generation}')" != "$GEN" ]; do sleep 5; done; oc rollout status deploy/kube-apiserver -n <CP-NAMESPACE> --timeout=10m
 ```
+
+Those three run in one shell session, because the second reads what the first set.
 
 Then check the forwarder is not complaining. Its sink is named after the output, not after a tenant:
 
@@ -246,10 +253,20 @@ Start or stop a virtual machine, then ask the log store directly. The gateway au
 GW=$(oc get route -n openshift-logging -l app.kubernetes.io/component=lokistack-gateway -o jsonpath='{.items[0].spec.host}' 2>/dev/null)
 T=$(oc whoami -t 2>/dev/null)
 [ -n "$GW" ] || echo 'no gateway Route here: wrong cluster'
-[ -n "$T" ]  || echo 'no token in this session: oc login -u <user> <api> first'
+[ -n "$T" ]  || echo 'no token in this session, see below'
 ```
 
 Both have to print nothing before the next block is worth running.
+
+A hosted cluster's admin kubeconfig signs in with a client certificate, so it carries no token and the second line fires. Two ways out. The console's own **Copy login command** gives you a working `oc login` with a token, and is the quickest. Or find the identity provider, which on a hosted cluster is not visible from inside it:
+
+*On the hosting cluster:*
+
+```bash
+oc get hc <HC-NAME> -n <HC-NAMESPACE> -o jsonpath='{.spec.configuration.oauth.identityProviders}{"\n"}'
+```
+
+Then `oc login -u <a user from that provider> $(oc whoami --show-server)` on the hosted cluster.
 
 ```bash
 curl -sk -H "Authorization: Bearer $T" -G \
@@ -260,7 +277,11 @@ curl -sk -H "Authorization: Bearer $T" -G \
   "https://$GW/api/logs/v1/audit/loki/api/v1/query_range" | python3 -m json.tool | head -40
 ```
 
-Read the output rather than filtering it: an error comes back as JSON too, and a grep for the fields you hoped to see hides it. What you want is records carrying `username` and `verb`. `user.username` is whoever authenticated; `impersonatedUser.username`, when present, is the person it was done for, and that is the one that matters.
+Read the output rather than filtering it: an error comes back as JSON too, and a grep for the fields you hoped to see hides it.
+
+What counts as success is narrower than a populated `username`, because nodes and controllers reading objects carry one as well. You want a record whose `objectRef.subresource` is `start`, `stop` or `restart`, or whose `objectRef.resource` is `virtualmachinesnapshots`, with a `username` that is a person rather than something beginning `system:`.
+
+An empty `result` with a non-zero `totalLinesProcessed` means the tenant holds data and nothing matched: widen the window by raising the 3600, or check you spelled the machine's name right. An empty `result` with zero lines processed means nothing is arriving at all, which is the first row of the table below. `user.username` is whoever authenticated; `impersonatedUser.username`, when present, is the person it was done for, and that is the one that matters.
 
 The console shows the same thing under Observe, Logs, audit tenant, but only on the cluster with the virtual machines. The hosting cluster has no Logs page, and after seven steps there that is the console you have open.
 
