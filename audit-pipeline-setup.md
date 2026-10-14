@@ -540,7 +540,7 @@ The fix needs both halves of the pipeline, and the second half is what keeps it 
 
 Nothing downstream can add a body that was never written. The collector filter chooses what passes; it does not go back and ask the API server for more. Setting `level: RequestResponse` on a collector rule alone produces records labelled `RequestResponse` with no body in them, which is worse than not working, because it reads as though something stripped them later.
 
-Capturing happens on the `APIServer` resource, and it does not have to be cluster-wide at full price. `customRules` applies a profile per group, first match wins, so service accounts can stay where they are while people get bodies:
+Capturing happens on the `APIServer` resource, and it does not have to be cluster-wide at full price. `customRules` applies a profile per group, first match wins, so service accounts can stay where they are while people get bodies. On an ordinary cluster, where the API server is this cluster's own:
 
 ```bash
 oc patch apiserver cluster --type=merge -p '{"spec":{"audit":{"profile":"Default","customRules":[{"group":"system:serviceaccounts","profile":"Default"},{"group":"system:authenticated","profile":"WriteRequestBodies"}]}}}'
@@ -548,11 +548,30 @@ oc patch apiserver cluster --type=merge -p '{"spec":{"audit":{"profile":"Default
 
 Order matters and the comment is the rule: a service account is also `system:authenticated`, so it has to match the narrower rule first or it falls through to the second one and you have bought the thing you were avoiding.
 
-This rolls the kube-apiserver, node by node. On a single node cluster that is a short window with no API. Watch it land:
+This rolls the kube-apiserver, node by node. On a single node cluster that is a short window with no API. Watch it land, again on the ordinary cluster:
 
 ```bash
 oc get kubeapiserver cluster -o jsonpath='{range .status.conditions[?(@.type=="NodeInstallerProgressing")]}{.reason}{": "}{.message}{"\n"}{end}'
 ```
+
+### Two clusters from here on, and which one a command belongs to
+
+Everything above this point concerns one cluster, so there was nothing to get wrong. From here there are two, and running the right command against the wrong one is the easiest mistake in this whole document.
+
+The names used below:
+
+| | |
+| --- | --- |
+| **the management cluster** | the one running the hosted control plane's pods. Also called the hosting cluster |
+| **the guest** | the cluster the control plane serves, where the virtual machines and the people are |
+
+Every command from here on says which of the two it belongs to. When in doubt, ask the cluster rather than the shell prompt:
+
+```bash
+oc get infrastructure cluster -o jsonpath='{.status.controlPlaneTopology}{"\n"}'
+```
+
+`External` means you are on a guest: its API server runs elsewhere. Anything else, such as `SingleReplica` or `HighlyAvailable`, means the control plane is this cluster's own, so you are on a management cluster or on an ordinary one. That beats reading the context name, which says whatever somebody typed when they created it.
 
 ### On a hosted cluster the API server is somewhere else
 
@@ -615,7 +634,7 @@ Everything above configures what the hosted API server writes. None of it gets a
 
 The `kubeAPI` audit source is not clever. It is a Vector `file` source with `include = ["/var/log/kube-apiserver/audit.log"]`, read off the node by hostPath. A hosted cluster's workers do not run an API server, so that file is not there, and the collector dutifully reads nothing. Measured on a stock hosted cluster with an untouched forwarder, all four audit sources enabled: 100 records sampled, 100 of them `auditd`, none from the API server. The audit tenant looks healthy, because node auditd is real and arrives, which is exactly what makes this take an afternoon to notice.
 
-Confirm it on your own cluster before building anything:
+Confirm it before building anything, in the **guest's** own log store:
 
 ```
 sum by (log_source) (count_over_time({log_type="audit"} | json [1h]))
@@ -698,7 +717,7 @@ That token belongs to a ServiceAccount on the **guest**, bound to `logging-colle
 
 ### The field marked immutable is not
 
-`spec.auditWebhook` carries a `// +immutable` marker in the API source, which reads like it can only be set when the cluster is created. The marker is a comment. Thirty-two fields in that file carry a real `XValidation` rule of `self == oldSelf`, and this is not one of them, so the API server enforces nothing. Verified against a running cluster with a server-side dry run, which exercises admission and persists nothing:
+`spec.auditWebhook` carries a `// +immutable` marker in the API source, which reads like it can only be set when the cluster is created. The marker is a comment. Thirty-two fields in that file carry a real `XValidation` rule of `self == oldSelf`, and this is not one of them, so the API server enforces nothing. Verified against a running cluster with a server-side dry run, which exercises admission and persists nothing. On the **management cluster**, which is where `HostedCluster` lives:
 
 ```bash
 oc patch hostedcluster <name> -n <namespace> --type=merge --dry-run=server -p '{"spec":{"auditWebhook":{"name":"does-not-exist"}}}'
