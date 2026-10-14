@@ -1,0 +1,34 @@
+# Sizes: 1x.demo, 1x.pico, 1x.extra-small, 1x.small, 1x.medium.
+# 1x.pico is the smallest Red Hat supports for production.
+# replicationFactor 1 with a single ingester means ingestion stops while that
+# ingester restarts. Fine for a lab, a decision to make deliberately elsewhere.
+
+apiVersion: loki.grafana.com/v1
+kind: LokiStack
+metadata:
+  name: logging-loki
+  namespace: openshift-logging
+spec:
+  limits:
+    global:
+      retention:
+        days: 15
+      queries:
+        queryTimeout: 2m
+  tenants:
+    mode: openshift-logging
+  managementState: Managed
+  rules:
+    enabled: true
+  replicationFactor: 1
+  size: 1x.pico
+  storage:
+    schemas:
+    - effectiveDate: '2022-06-21'
+      version: v13
+    secret:
+      name: logging-loki-s3
+      type: s3
+    tls:
+      caName: openshift-service-ca.crt
+  storageClassName: <YOUR-STORAGE-CLASS>

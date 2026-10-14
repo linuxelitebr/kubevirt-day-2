@@ -1,0 +1,47 @@
+# Identity the MANAGEMENT cluster's collector uses to write into this guest's
+# Loki. It has to be a ServiceAccount from HERE: the gateway authorises with a
+# TokenReview against its own cluster's API server, so an identity minted
+# anywhere else is not something it can evaluate.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: hcp-audit-writer
+  namespace: openshift-logging
+---
+# Deliberately narrower than logging-collector-logs-writer, which grants all
+# three tenants. This path only ever writes audit.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hcp-audit-writer
+rules:
+  - apiGroups: ["loki.grafana.com"]
+    resources: ["audit"]
+    resourceNames: ["logs"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hcp-audit-writer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hcp-audit-writer
+subjects:
+  - kind: ServiceAccount
+    name: hcp-audit-writer
+    namespace: openshift-logging
+---
+# A token that does not expire. The projected token a pod gets by default does,
+# and the collector lives in another cluster with no way to renew this one, so
+# collection would stop silently months later. Nothing rotates this: treat it
+# as a credential you own.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hcp-audit-writer-token
+  namespace: openshift-logging
+  annotations:
+    kubernetes.io/service-account.name: hcp-audit-writer
+type: kubernetes.io/service-account-token
