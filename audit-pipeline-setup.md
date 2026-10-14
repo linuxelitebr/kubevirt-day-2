@@ -540,7 +540,9 @@ The fix needs both halves of the pipeline, and the second half is what keeps it 
 
 Nothing downstream can add a body that was never written. The collector filter chooses what passes; it does not go back and ask the API server for more. Setting `level: RequestResponse` on a collector rule alone produces records labelled `RequestResponse` with no body in them, which is worse than not working, because it reads as though something stripped them later.
 
-Capturing happens on the `APIServer` resource, and it does not have to be cluster-wide at full price. `customRules` applies a profile per group, first match wins, so service accounts can stay where they are while people get bodies. On an ordinary cluster, where the API server is this cluster's own:
+Capturing happens on the `APIServer` resource, and it does not have to be cluster-wide at full price. `customRules` applies a profile per group, first match wins, so service accounts can stay where they are while people get bodies.
+
+*From a standalone cluster:*
 
 ```bash
 oc patch apiserver cluster --type=merge -p '{"spec":{"audit":{"profile":"Default","customRules":[{"group":"system:serviceaccounts","profile":"Default"},{"group":"system:authenticated","profile":"WriteRequestBodies"}]}}}'
@@ -548,7 +550,9 @@ oc patch apiserver cluster --type=merge -p '{"spec":{"audit":{"profile":"Default
 
 Order matters and the comment is the rule: a service account is also `system:authenticated`, so it has to match the narrower rule first or it falls through to the second one and you have bought the thing you were avoiding.
 
-This rolls the kube-apiserver, node by node. On a single node cluster that is a short window with no API. Watch it land, again on the ordinary cluster:
+This rolls the kube-apiserver, node by node. On a single node cluster that is a short window with no API. Watch it land.
+
+*From a standalone cluster:*
 
 ```bash
 oc get kubeapiserver cluster -o jsonpath='{range .status.conditions[?(@.type=="NodeInstallerProgressing")]}{.reason}{": "}{.message}{"\n"}{end}'
@@ -562,10 +566,42 @@ The names used below:
 
 | | |
 | --- | --- |
-| **the management cluster** | the one running the hosted control plane's pods. Also called the hosting cluster |
-| **the guest** | the cluster the control plane serves, where the virtual machines and the people are |
+| **the hosting cluster** | the one running the hosted control plane's pods. Also called the management cluster |
+| **the hosted cluster** | the one that control plane serves, where the virtual machines and the people are. Also called the guest |
 
-Every command from here on says which of the two it belongs to. When in doubt, ask the cluster rather than the shell prompt:
+Every command from here on is preceded by a line in italics saying which of the two it belongs to.
+
+### The three names you will be substituting, and where to read them
+
+Most of the commands below take a hosted cluster's name, the namespace its `HostedCluster` lives in, or the namespace its control plane runs in. Those are three different strings and two of them look alike, which is how a patch ends up addressed at a cluster that does not exist.
+
+*From the hosting cluster:*
+
+```bash
+oc get hc -A
+```
+
+```
+NAMESPACE     NAME      VERSION   ...
+clusters      payments  4.20.8    ...
+```
+
+The first column is the namespace the `HostedCluster` object lives in and the second is its name, in that order, which is the opposite of the order `oc patch <name> -n <namespace>` wants them in. The control plane runs in a third namespace, named `<namespace>-<name>`, so `clusters` plus `payments` gives `clusters-payments`. Read that one off the cluster rather than assembling it by hand:
+
+*From the hosting cluster:*
+
+```bash
+oc get hcp -A
+```
+
+```
+NAMESPACE           NAME      VERSION   ...
+clusters-payments   payments  4.20.8    ...
+```
+
+That namespace is where steps 4 to 6 of the next section go, and where you look for the rendered audit configuration and the API server rollout. When in doubt, ask the cluster rather than the shell prompt.
+
+*From either cluster:*
 
 ```bash
 oc get infrastructure cluster -o jsonpath='{.status.controlPlaneTopology}{"\n"}'
@@ -589,7 +625,9 @@ if hcluster.Spec.Configuration != nil {
 
 Note the `else`. Editing a copy while the `HostedCluster` carries no configuration of its own does not revert to the previous value, it clears it.
 
-The block goes under `spec.configuration` on the `HostedCluster`, on the management cluster:
+The block goes under `spec.configuration` on the `HostedCluster`.
+
+*From the hosting cluster:*
 
 ```yaml
 spec:
@@ -606,19 +644,25 @@ spec:
 
 Same ordering rule as above, for the same reason. `profile` and `customRules` are the only fields accepted here, the webhook form is not one of them.
 
-To check it landed, from the guest, where you are probably already working:
+To check it landed, where you are probably already working.
+
+*From the hosted cluster:*
 
 ```bash
 oc get apiserver cluster -o jsonpath='{.spec.audit}{"\n"}'
 ```
 
-That reads a copy, so it tells you the setting reached the guest and nothing more, which is still the fastest way to catch a typo. For what the API server actually loaded, the management cluster holds the rendered policy and the profile name as plain text:
+That reads a copy, so it tells you the setting reached the guest and nothing more, which is still the fastest way to catch a typo. For what the API server actually loaded, the management cluster holds the rendered policy and the profile name as plain text.
+
+*From the hosting cluster:*
 
 ```bash
 oc get cm kas-audit-config -n <hostedcluster-namespace>-<name> -o jsonpath='{.data.profile}{"\n"}'
 ```
 
-The `oc get kubeapiserver cluster` command above does not work on a guest at all. That resource belongs to the cluster-kube-apiserver-operator, which a hosted cluster does not run. Watch the rollout on the management cluster instead:
+The `oc get kubeapiserver cluster` command above does not work on a guest at all. That resource belongs to the cluster-kube-apiserver-operator, which a hosted cluster does not run. Watch the rollout instead.
+
+*From the hosting cluster:*
 
 ```bash
 oc rollout status deploy/kube-apiserver -n <hostedcluster-namespace>-<name>
@@ -634,7 +678,9 @@ Everything above configures what the hosted API server writes. None of it gets a
 
 The `kubeAPI` audit source is not clever. It is a Vector `file` source with `include = ["/var/log/kube-apiserver/audit.log"]`, read off the node by hostPath. A hosted cluster's workers do not run an API server, so that file is not there, and the collector dutifully reads nothing. Measured on a stock hosted cluster with an untouched forwarder, all four audit sources enabled: 100 records sampled, 100 of them `auditd`, none from the API server. The audit tenant looks healthy, because node auditd is real and arrives, which is exactly what makes this take an afternoon to notice.
 
-Confirm it before building anything, in the **guest's** own log store:
+Confirm it before building anything.
+
+*From the hosted cluster's log store:*
 
 ```
 sum by (log_source) (count_over_time({log_type="audit"} | json [1h]))
@@ -670,7 +716,9 @@ The order is not arbitrary. The token in step 1 is what step 4 carries, step 4 i
 
 The hosted API servers can post audit events to a webhook, and HyperShift already wires that up: `HostedCluster.spec.auditWebhook` names a Secret holding a kubeconfig under the key `webhook-kubeconfig`, which is synced into the hosted control plane namespace, mounted at `/etc/kubernetes/auditwebhook`, and turned into `--audit-webhook-config-file` with `--audit-webhook-mode=batch`. It is applied to all four of them, kube-apiserver, openshift-apiserver, oauth-apiserver and oauth-server, so the openshift-apiserver and oauth records come along without extra work. They do not come along as `openshiftAPI`, though. The receiver stamps `log_source = "kubeAPI"` on everything it accepts, so on a hosted cluster all four servers share one `log_source`, and a query filtering `log_source="openshiftAPI"`, which is what those same records answer to on a standalone cluster, finds nothing.
 
-Point that webhook at a `ClusterLogForwarder` receiver running in the hosted control plane namespace, and give that forwarder a `loki` output aimed at the guest's gateway. This one is applied on the **management cluster**, in the hosted control plane namespace, which is step 5:
+Point that webhook at a `ClusterLogForwarder` receiver running in the hosted control plane namespace, and give that forwarder a `loki` output aimed at the guest's gateway. This one is applied on the **management cluster**, in the hosted control plane namespace, which is step 5.
+
+*Applied on the hosting cluster:*
 
 ```yaml
 spec:
@@ -703,7 +751,9 @@ spec:
 
 #### Finding the guest's gateway host, and proving the management cluster can reach it
 
-The route is named after the LokiStack, so do not hard-code `logging-loki`. Ask by label instead, on the **guest**:
+The route is named after the LokiStack, so do not hard-code `logging-loki`. Ask by label instead.
+
+*From the hosted cluster:*
 
 ```bash
 oc get route -n openshift-logging -l app.kubernetes.io/component=lokistack-gateway -o jsonpath='{.items[0].spec.host}'
@@ -711,7 +761,9 @@ oc get route -n openshift-logging -l app.kubernetes.io/component=lokistack-gatew
 
 That is the whole value for the `url` above, with `https://` in front and `/api/logs/v1/audit` after it. The tenant is part of the path, which is how LokiStack separates the three.
 
-Reading the name is the easy half. The forwarder runs on the management cluster, and nothing says the management cluster can resolve a hostname served by the guest's ingress. In a lab where one cluster's wildcard sits under the other's it works by accident; between two clusters that share no DNS it does not, and the symptom is a collector retrying forever while the ClusterLogForwarder reports itself healthy. Check it from inside the management cluster, not from your laptop:
+Reading the name is the easy half. The forwarder runs on the management cluster, and nothing says the management cluster can resolve a hostname served by the guest's ingress. In a lab where one cluster's wildcard sits under the other's it works by accident; between two clusters that share no DNS it does not, and the symptom is a collector retrying forever while the ClusterLogForwarder reports itself healthy. Check it from inside the cluster, not from your laptop.
+
+*From the hosting cluster:*
 
 ```bash
 # oc get hcp -A
@@ -734,7 +786,9 @@ That token belongs to a ServiceAccount on the **guest**, which is step 1 and has
 
 ### The field marked immutable is not
 
-`spec.auditWebhook` carries a `// +immutable` marker in the API source, which reads like it can only be set when the cluster is created. The marker is a comment. Thirty-two fields in that file carry a real `XValidation` rule of `self == oldSelf`, and this is not one of them, so the API server enforces nothing. Verified against a running cluster with a server-side dry run, which exercises admission and persists nothing. On the **management cluster**, which is where `HostedCluster` lives:
+`spec.auditWebhook` carries a `// +immutable` marker in the API source, which reads like it can only be set when the cluster is created. The marker is a comment. Thirty-two fields in that file carry a real `XValidation` rule of `self == oldSelf`, and this is not one of them, so the API server enforces nothing. Verified against a running cluster with a server-side dry run, which exercises admission and persists nothing. On the **management cluster**, which is where `HostedCluster` lives.
+
+*From the hosting cluster:*
 
 ```bash
 oc patch hostedcluster <name> -n <namespace> --type=merge --dry-run=server -p '{"spec":{"auditWebhook":{"name":"does-not-exist"}}}'
