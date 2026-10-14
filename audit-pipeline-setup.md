@@ -666,6 +666,24 @@ spec:
       outputRefs: [guest-loki]
 ```
 
+#### Finding the guest's gateway host, and proving the management cluster can reach it
+
+The route is named after the LokiStack, so do not hard-code `logging-loki`. Ask by label instead, on the **guest**:
+
+```bash
+oc get route -n openshift-logging -l app.kubernetes.io/component=lokistack-gateway -o jsonpath='{.items[0].spec.host}'
+```
+
+That is the whole value for the `url` above, with `https://` in front and `/api/logs/v1/audit` after it. The tenant is part of the path, which is how LokiStack separates the three.
+
+Reading the name is the easy half. The forwarder runs on the management cluster, and nothing says the management cluster can resolve a hostname served by the guest's ingress. In a lab where one cluster's wildcard sits under the other's it works by accident; between two clusters that share no DNS it does not, and the symptom is a collector retrying forever while the ClusterLogForwarder reports itself healthy. Check it from inside the management cluster, not from your laptop:
+
+```bash
+oc exec -n <hosted-control-plane-namespace> <any-pod> -- curl -sk -o /dev/null -w '%{http_code}\n' --max-time 15 https://<guest-gateway-host>/api/logs/v1/audit/loki/api/v1/labels
+```
+
+`302` is the answer you want: the gateway redirects a request carrying no token, which means DNS resolved and the route answered. `000` or a timeout means the management cluster cannot get there, and that is a networking prerequisite to settle before any of the rest of this is worth applying.
+
 `serviceAccount` is required, and the account has to exist in the forwarder's own namespace, which here is the hosted control plane namespace on the management cluster. It needs no role bindings: a forwarder whose only input is a receiver skips the `collect-*` authorization check entirely, so the account only has to be there. Leave it out and the apply is refused with `spec.serviceAccount: Required value` before any of the rest is read.
 
 The output is `loki`, not `lokiStack`. The `lokiStack` type resolves an instance in its own cluster, which is the thing the management cluster does not have and does not want. The generic type takes a URL and a bearer token and asks no further questions.
