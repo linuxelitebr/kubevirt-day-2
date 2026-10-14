@@ -540,7 +540,7 @@ The fix needs both halves of the pipeline, and the second half is what keeps it 
 
 Nothing downstream can add a body that was never written. The collector filter chooses what passes; it does not go back and ask the API server for more. Setting `level: RequestResponse` on a collector rule alone produces records labelled `RequestResponse` with no body in them, which is worse than not working, because it reads as though something stripped them later.
 
-Capturing happens on the `APIServer` resource, and it does not have to be cluster-wide at full price. `customRules` applies a profile per group, first match wins, so service accounts can stay where they are while people get bodies:
+Capturing happens on the `APIServer` resource, and it does not have to be cluster-wide at full price. `customRules` applies a profile per group, first match wins, so service accounts can stay where they are while people get bodies. On an ordinary cluster, where the API server is this cluster's own:
 
 ```bash
 oc patch apiserver cluster --type=merge -p '{"spec":{"audit":{"profile":"Default","customRules":[{"group":"system:serviceaccounts","profile":"Default"},{"group":"system:authenticated","profile":"WriteRequestBodies"}]}}}'
@@ -548,11 +548,30 @@ oc patch apiserver cluster --type=merge -p '{"spec":{"audit":{"profile":"Default
 
 Order matters and the comment is the rule: a service account is also `system:authenticated`, so it has to match the narrower rule first or it falls through to the second one and you have bought the thing you were avoiding.
 
-This rolls the kube-apiserver, node by node. On a single node cluster that is a short window with no API. Watch it land:
+This rolls the kube-apiserver, node by node. On a single node cluster that is a short window with no API. Watch it land, again on the ordinary cluster:
 
 ```bash
 oc get kubeapiserver cluster -o jsonpath='{range .status.conditions[?(@.type=="NodeInstallerProgressing")]}{.reason}{": "}{.message}{"\n"}{end}'
 ```
+
+### Two clusters from here on, and which one a command belongs to
+
+Everything above this point concerns one cluster, so there was nothing to get wrong. From here there are two, and running the right command against the wrong one is the easiest mistake in this whole document.
+
+The names used below:
+
+| | |
+| --- | --- |
+| **the management cluster** | the one running the hosted control plane's pods. Also called the hosting cluster |
+| **the guest** | the cluster the control plane serves, where the virtual machines and the people are |
+
+Every command from here on says which of the two it belongs to. When in doubt, ask the cluster rather than the shell prompt:
+
+```bash
+oc get infrastructure cluster -o jsonpath='{.status.controlPlaneTopology}{"\n"}'
+```
+
+`External` means you are on a guest: its API server runs elsewhere. Anything else, such as `SingleReplica` or `HighlyAvailable`, means the control plane is this cluster's own, so you are on a management cluster or on an ordinary one. That beats reading the context name, which says whatever somebody typed when they created it.
 
 ### On a hosted cluster the API server is somewhere else
 
@@ -615,7 +634,7 @@ Everything above configures what the hosted API server writes. None of it gets a
 
 The `kubeAPI` audit source is not clever. It is a Vector `file` source with `include = ["/var/log/kube-apiserver/audit.log"]`, read off the node by hostPath. A hosted cluster's workers do not run an API server, so that file is not there, and the collector dutifully reads nothing. Measured on a stock hosted cluster with an untouched forwarder, all four audit sources enabled: 100 records sampled, 100 of them `auditd`, none from the API server. The audit tenant looks healthy, because node auditd is real and arrives, which is exactly what makes this take an afternoon to notice.
 
-Confirm it on your own cluster before building anything:
+Confirm it before building anything, in the **guest's** own log store:
 
 ```
 sum by (log_source) (count_over_time({log_type="audit"} | json [1h]))
@@ -633,9 +652,25 @@ So the records have to come to the guest. Then every reader that already works, 
 
 ### Bringing them over
 
+Seven steps across the two clusters, in this order. The rest of this section explains each one and why it is shaped the way it is, but the order is the part that matters, because the last step restarts an API server and the ones before it are what make that restart worth doing.
+
+| | where | what |
+| --- | --- | --- |
+| 1 | guest | the writer identity: a ServiceAccount, a ClusterRole granting `create` on `audit` and nothing else, and a Secret holding a token that does not expire |
+| 2 | guest | read the gateway host off the route |
+| 3 | management | prove the management cluster can reach that host |
+| 4 | management, in the hosted control plane namespace | a Secret holding the guest's token |
+| 5 | management, in the hosted control plane namespace | the `ClusterLogForwarder`: a `receiver` input and a generic `loki` output pointed at the guest |
+| 6 | management, in the hosted control plane namespace | a Secret holding the webhook kubeconfig, under the key `webhook-kubeconfig` |
+| 7 | management | set `HostedCluster.spec.auditWebhook`, which rolls the hosted API server |
+
+Steps 1 and 5 have files in [manifests/](manifests/): `hosted-cluster-audit-writer.yaml` on the guest and `hosted-cluster-forwarder.yaml` on the management cluster. Applying a file beats copying a snippet out of prose.
+
+The order is not arbitrary. The token in step 1 is what step 4 carries, step 4 is what step 5 authenticates with, and step 7 sends traffic at something that has to already be listening. Doing 7 first gives you an API server restart and a webhook posting into nothing.
+
 The hosted API servers can post audit events to a webhook, and HyperShift already wires that up: `HostedCluster.spec.auditWebhook` names a Secret holding a kubeconfig under the key `webhook-kubeconfig`, which is synced into the hosted control plane namespace, mounted at `/etc/kubernetes/auditwebhook`, and turned into `--audit-webhook-config-file` with `--audit-webhook-mode=batch`. It is applied to all four of them, kube-apiserver, openshift-apiserver, oauth-apiserver and oauth-server, so the openshift-apiserver and oauth records come along without extra work. They do not come along as `openshiftAPI`, though. The receiver stamps `log_source = "kubeAPI"` on everything it accepts, so on a hosted cluster all four servers share one `log_source`, and a query filtering `log_source="openshiftAPI"`, which is what those same records answer to on a standalone cluster, finds nothing.
 
-Point that webhook at a `ClusterLogForwarder` receiver running in the hosted control plane namespace, and give that forwarder a `loki` output aimed at the guest's gateway:
+Point that webhook at a `ClusterLogForwarder` receiver running in the hosted control plane namespace, and give that forwarder a `loki` output aimed at the guest's gateway. This one is applied on the **management cluster**, in the hosted control plane namespace, which is step 5:
 
 ```yaml
 spec:
@@ -688,7 +723,7 @@ oc exec -n <hosted-control-plane-namespace> <any-pod> -- curl -sk -o /dev/null -
 
 The output is `loki`, not `lokiStack`. The `lokiStack` type resolves an instance in its own cluster, which is the thing the management cluster does not have and does not want. The generic type takes a URL and a bearer token and asks no further questions.
 
-That token belongs to a ServiceAccount on the **guest**, bound to `logging-collector-logs-writer`, which ships with the operator. A guest ServiceAccount is an identity the guest gateway can evaluate, which is the whole point. Read the role before you bind it, though: it grants `create` on `logs` for `application`, `audit` and `infrastructure` alike, and there is no audit-only variant shipped. A token bound to it can write to all three tenants, on a cluster it does not live in. Writing your own ClusterRole naming the `audit` resource and nothing else costs four lines.
+That token belongs to a ServiceAccount on the **guest**, which is step 1 and has to exist before any of this is applied, bound to `logging-collector-logs-writer`, which ships with the operator. A guest ServiceAccount is an identity the guest gateway can evaluate, which is the whole point. Read the role before you bind it, though: it grants `create` on `logs` for `application`, `audit` and `infrastructure` alike, and there is no audit-only variant shipped. A token bound to it can write to all three tenants, on a cluster it does not live in. Writing your own ClusterRole naming the `audit` resource and nothing else costs four lines.
 
 ### Two things that will bite
 
@@ -698,7 +733,7 @@ That token belongs to a ServiceAccount on the **guest**, bound to `logging-colle
 
 ### The field marked immutable is not
 
-`spec.auditWebhook` carries a `// +immutable` marker in the API source, which reads like it can only be set when the cluster is created. The marker is a comment. Thirty-two fields in that file carry a real `XValidation` rule of `self == oldSelf`, and this is not one of them, so the API server enforces nothing. Verified against a running cluster with a server-side dry run, which exercises admission and persists nothing:
+`spec.auditWebhook` carries a `// +immutable` marker in the API source, which reads like it can only be set when the cluster is created. The marker is a comment. Thirty-two fields in that file carry a real `XValidation` rule of `self == oldSelf`, and this is not one of them, so the API server enforces nothing. Verified against a running cluster with a server-side dry run, which exercises admission and persists nothing. On the **management cluster**, which is where `HostedCluster` lives:
 
 ```bash
 oc patch hostedcluster <name> -n <namespace> --type=merge --dry-run=server -p '{"spec":{"auditWebhook":{"name":"does-not-exist"}}}'
