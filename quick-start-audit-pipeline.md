@@ -1,104 +1,132 @@
 # Quick start: naming who did what
 
-The short version of [audit-pipeline-setup.md](audit-pipeline-setup.md). Commands only, one line of reason where getting it wrong fails silently. Every explanation lives in the long page; this one assumes you want the thing working today.
+Commands, in order, with the cluster each one runs on. The reasons are in [audit-pipeline-setup.md](audit-pipeline-setup.md); this page assumes you want it working today.
 
-What you get: a virtual machine's activity named by person, in OVTools or in any Loki query. What it costs: a log store, and audit records leaving the API server.
+**What this covers:** making a virtual machine's start, stop, restart and snapshot show the person who did it.
 
-## Which path you are on
+**What it does not:** standing up the log store. That is operators, a bucket and a storage class, and it is written up properly in [Operators](audit-pipeline-setup.md#operators), [Object storage](audit-pipeline-setup.md#object-storage) and [LokiStack](audit-pipeline-setup.md#lokistack). Step 0 below tells you whether you already have it.
 
-*From the cluster holding the virtual machines:*
+Every block says which cluster it runs on. Check before each one, because both clusters in a hosted setup have an `openshift-logging` namespace and a `ClusterLogForwarder`, so the wrong context answers plausibly instead of erroring:
+
+```bash
+oc whoami --show-server
+```
+
+## Step 0: do you have a log store
+
+Run these on the cluster where `oc get vm -A` lists the machines you care about.
+
+```bash
+oc get lokistack -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}: {range .status.conditions[*]}{.type}={.status} {end}{"\n"}{end}'
+```
+
+You want one line ending `Ready=True`. Nothing at all, or `Pending=True`, means the store is not there or not up: go to [LokiStack](audit-pipeline-setup.md#lokistack) and come back.
+
+```bash
+oc auth can-i get 'audit.loki.grafana.com/logs'
+```
+
+`yes` means you can read the audit tenant. `no` means go to [Reader access](audit-pipeline-setup.md#reader-access) first, and note that a cluster admin passes without any binding while everyone else needs one.
+
+```bash
+oc get clusterlogforwarder -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'
+```
+
+A forwarder has to exist and carry an `audit` input. If it does not, [the forwarder section](audit-pipeline-setup.md#the-forwarder-with-the-filter-that-makes-this-affordable) has the whole file.
+
+## Step 1: which path
 
 ```bash
 oc get infrastructure cluster -o jsonpath='{.status.controlPlaneTopology}{"\n"}'
 ```
 
-Anything other than `External` means an ordinary cluster. Follow **A**, and stop there.
+Anything other than `External` is an ordinary cluster: do **A**, skip **B**.
 
-`External` means a hosted cluster: its API server runs in another cluster and writes its audit there. Follow **A** on it anyway, for the log store and the reader access, then **B** to bring the records across.
+`External` is a hosted cluster: its API server runs elsewhere and writes its audit there, so do **A** on it and then **B** on the cluster hosting its control plane.
 
-## Names you will substitute
+On HyperShift with KubeVirt the hosting cluster also runs virtual machines, the guest's own nodes. Run the command above on the cluster whose API you use to start and stop the machines you care about, not on the one whose `oc get vm` happens to list something.
 
-*From the hosting cluster:*
+## A. On the cluster with the virtual machines
+
+Power actions already carry a name once step 0 passes. Snapshot deletions do not, because the record names the snapshot and not the machine, and only the request body ties the two together. If you want those named, capture bodies for people and not for service accounts. This restarts the API server.
+
+*On an ordinary cluster:*
+
+```bash
+oc patch apiserver cluster --type=merge -p '{"spec":{"audit":{"profile":"Default","customRules":[{"group":"system:serviceaccounts","profile":"Default"},{"group":"system:authenticated","profile":"WriteRequestBodies"}]}}}'
+```
+
+Order matters: a service account is also `system:authenticated`, so it has to match the narrower rule first.
+
+On a hosted cluster the same setting lives on the `HostedCluster` instead. [That section](audit-pipeline-setup.md#on-a-hosted-cluster-the-api-server-is-somewhere-else) has it.
+
+Then check the collector is not being refused. Scope it to the audit sink: the application and infrastructure sinks produce their own errors on healthy clusters, and a `429` anywhere is backpressure rather than permission.
+
+*On the cluster with the virtual machines:*
+
+```bash
+oc logs -n openshift-logging -l app.kubernetes.io/component=collector --since=10m --tail=500 | grep -E 'output_default_lokistack_audit' | grep -iE 'error|403'
+```
+
+No output is what you want. A `403` here means the collector's write role, which the long page covers.
+
+If this is an ordinary cluster, go to **Checking it worked**.
+
+## B. Bringing the records across, hosted clusters only
+
+The hosting cluster needs **Red Hat OpenShift Logging** installed. It does not need Loki, a LokiStack, or a bucket.
+
+### The three names
+
+*On the hosting cluster:*
 
 ```bash
 oc get hc -A && oc get hcp -A
 ```
 
-`oc get hc` prints the namespace first and the name second, the opposite of what `oc patch <name> -n <namespace>` wants. `oc get hcp` prints the control plane namespace, which is a third string, named `<namespace>-<name>`. Three different values, two of which look alike.
+| placeholder | where to read it |
+| --- | --- |
+| `<HC-NAMESPACE>` | the NAMESPACE column of `oc get hc` |
+| `<HC-NAME>` | the NAME column of `oc get hc` |
+| `<CP-NAMESPACE>` | the NAMESPACE column of `oc get hcp`, which is the other two joined by a dash |
 
-## A. The log store, on the cluster with the virtual machines
+`oc get hc` prints namespace first and name second, the opposite of what `oc patch <name> -n <namespace>` wants. That is the easiest mistake here.
 
-Install **Red Hat OpenShift Logging** and **Loki Operator**, and have an S3-compatible bucket with its Secret already created.
+### B1. The writer identity
 
-*From that cluster:*
-
-```bash
-oc apply -f manifests/lokistack.yaml
-```
-
-```bash
-oc apply -f manifests/forwarder-and-rbac.yaml
-```
-
-Wait for the stack:
-
-```bash
-oc get lokistack logging-loki -n openshift-logging -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}{"\n"}'
-```
-
-Then confirm the collector is not being refused. This is the one failure the operator never reports: the `ClusterLogForwarder` says `Ready` while every write is rejected.
-
-```bash
-oc logs -n openshift-logging -l app.kubernetes.io/component=collector --tail=50 | grep -iE 'error|403'
-```
-
-Silence there is the proof it works.
-
-Give the people who will ask the questions read access. A cluster admin already passes without any binding, but the console's Logs page does not, and a non-admin has nothing:
-
-```bash
-oc adm groups new log-readers alice bob
-```
-
-```bash
-oc create clusterrolebinding logs-view-audit --clusterrole=cluster-logging-audit-view --group=log-readers
-```
-
-That role reads the whole cluster's audit, not a filtered slice. The long page explains why.
-
-On an ordinary cluster you are done. Skip to **Checking it worked**.
-
-## B. Bringing the records across, for a hosted cluster
-
-The API server is a pod in the hosting cluster, so nothing you configure on the hosted cluster will ever collect its audit. The hosting cluster needs **Red Hat OpenShift Logging** installed. It does not need Loki, a LokiStack, or a bucket.
-
-### 1. The writer identity
-
-*From the hosted cluster:*
+*On the hosted cluster:*
 
 ```bash
 oc apply -f manifests/hosted-cluster-audit-writer.yaml
 ```
 
+The token is filled in asynchronously, so wait for it rather than reading straight away:
+
 ```bash
-oc get secret hcp-audit-writer-token -n openshift-logging -o jsonpath='{.data.token}' | base64 -d > /tmp/writer.token
+oc wait --for=jsonpath='{.data.token}' secret/hcp-audit-writer-token -n openshift-logging --timeout=60s
 ```
 
-That token does not expire, by design: it crosses a cluster boundary and the collector on the far side cannot renew it. The ClusterRole grants `create` on `audit` and nothing else.
+```bash
+oc get secret hcp-audit-writer-token -n openshift-logging -o jsonpath='{.data.token}' | base64 -d > /tmp/writer.token && wc -c < /tmp/writer.token
+```
 
-### 2. The gateway host
+A few hundred bytes is right. Zero means you read it too early.
 
-*From the hosted cluster:*
+That token does not expire by design: it crosses a cluster boundary and the far side cannot renew it. Its role grants `create` on `audit` and nothing else.
+
+### B2. The gateway host
+
+*On the hosted cluster:*
 
 ```bash
 oc get route -n openshift-logging -l app.kubernetes.io/component=lokistack-gateway -o jsonpath='{.items[0].spec.host}{"\n"}'
 ```
 
-Ask by label, not by name: the route is named after the LokiStack.
+Call this `<GATEWAY-HOST>`. It is a hostname, not the Route's name. Ask by label, because the Route is named after the LokiStack.
 
-### 3. The collector identity and the token, on the other side
+### B3. The collector identity and the token
 
-*From the hosting cluster:*
+*On the hosting cluster:*
 
 ```bash
 oc create sa audit-collector -n openshift-logging
@@ -108,23 +136,23 @@ oc create sa audit-collector -n openshift-logging
 oc create secret generic guest-loki-token -n openshift-logging --from-file=token=/tmp/writer.token
 ```
 
-The ServiceAccount needs no bindings. It only has to exist, or the forwarder is refused.
+The ServiceAccount needs no bindings. It only has to exist, or the forwarder is refused with `spec.serviceAccount: Required value`.
 
-### 4. Prove the hosting cluster reaches the gateway
+### B4. Prove the hosting cluster reaches the gateway
 
-*From the hosting cluster:*
+*On the hosting cluster:*
 
 ```bash
-oc exec -n <CONTROL-PLANE-NAMESPACE> deploy/kube-apiserver -c kube-apiserver -- curl -sk -o /dev/null -w '%{http_code}\n' --max-time 15 https://<GATEWAY-HOST>/api/logs/v1/audit/loki/api/v1/labels
+oc exec -n <CP-NAMESPACE> deploy/kube-apiserver -c kube-apiserver -- curl -sk -o /dev/null -w '%{http_code}\n' --max-time 15 https://<GATEWAY-HOST>/api/logs/v1/audit/loki/api/v1/labels
 ```
 
-`302` is what you want. A timeout means the two clusters share no DNS and nothing below is worth applying.
+`302` is what you want: the gateway redirected a request with no token, so DNS resolved and the route answered. A timeout means the two clusters share no DNS, and nothing below is worth applying until that is fixed.
 
-### 5. The forwarder
+### B5. The forwarder
 
-Edit `<GUEST-GATEWAY-ROUTE>` in the file first.
+Put `<GATEWAY-HOST>` from B2 into the `url` field of `manifests/hosted-cluster-forwarder.yaml`, replacing the placeholder there. The host, not the Route's name.
 
-*From the hosting cluster:*
+*On the hosting cluster:*
 
 ```bash
 oc apply -f manifests/hosted-cluster-forwarder.yaml
@@ -132,9 +160,17 @@ oc apply -f manifests/hosted-cluster-forwarder.yaml
 
 It goes in `openshift-logging`, not in the control plane namespace, where pod security rejects the collector outright.
 
-### 6. The webhook kubeconfig
+Confirm the receiver came up. The operator names its Service after the forwarder plus the input:
 
-Write this file, substituting nothing. The Service name is the forwarder's name plus the input's name, and both come from the manifest you just applied.
+```bash
+oc get svc -n openshift-logging -o name | grep hosted-audit
+```
+
+You should see `hosted-audit-hosted-kas-audit`, which is the name the next step hard-codes.
+
+### B6. The webhook kubeconfig
+
+Write this to `/tmp/audit-webhook-kubeconfig`, substituting nothing:
 
 ```yaml
 apiVersion: v1
@@ -153,54 +189,62 @@ users:
   user: {}
 ```
 
-*From the hosting cluster, in the namespace the `HostedCluster` lives in:*
+*On the hosting cluster:*
 
 ```bash
-oc create secret generic audit-webhook -n <HOSTEDCLUSTER-NAMESPACE> --from-file=webhook-kubeconfig=<FILE>
+oc create secret generic audit-webhook -n <HC-NAMESPACE> --from-file=webhook-kubeconfig=/tmp/audit-webhook-kubeconfig
 ```
 
-The key has to be `webhook-kubeconfig` exactly.
+The key has to be `webhook-kubeconfig` exactly, and the Secret goes beside the `HostedCluster`, not in the control plane namespace. HyperShift copies it across itself.
 
-### 7. Turn it on
+### B7. Turn it on
 
 This restarts the hosted API server. On `SingleReplica` that is a short window with no API on the hosted cluster.
 
-*From the hosting cluster:*
+*On the hosting cluster:*
 
 ```bash
-oc patch hostedcluster <NAME> -n <HOSTEDCLUSTER-NAMESPACE> --type=merge -p '{"spec":{"auditWebhook":{"name":"audit-webhook"}}}'
+oc patch hostedcluster <HC-NAME> -n <HC-NAMESPACE> --type=merge -p '{"spec":{"auditWebhook":{"name":"audit-webhook"}}}'
 ```
 
 ```bash
-oc rollout status deploy/kube-apiserver -n <CONTROL-PLANE-NAMESPACE> --timeout=10m
+oc rollout status deploy/kube-apiserver -n <CP-NAMESPACE> --timeout=10m
 ```
+
+Then check the forwarder is not complaining. Its sink is named after the output, not after a tenant:
+
+```bash
+oc logs -n openshift-logging -l app.kubernetes.io/instance=hosted-audit --since=5m | grep -E 'output_guest_loki' | grep -iE 'error|403'
+```
+
+No output is what you want.
 
 ## Checking it worked
 
-*From the hosting cluster, for a hosted cluster only:*
+Start or stop a virtual machine, then ask the log store directly. This runs from your own machine against the cluster with the virtual machines, using your own token, which is the same path the dashboard uses.
 
 ```bash
-oc logs -n openshift-logging -l app.kubernetes.io/instance=hosted-audit --since=5m | grep -icE 'error|403|certificate'
+GW=$(oc get route -n openshift-logging -l app.kubernetes.io/component=lokistack-gateway -o jsonpath='{.items[0].spec.host}')
+curl -sk -H "Authorization: Bearer $(oc whoami -t)" -G \
+  --data-urlencode 'query={log_type="audit"} |~ "<VM-NAME>"' \
+  --data-urlencode "start=$(( $(date +%s) - 3600 ))000000000" \
+  --data-urlencode "end=$(date +%s)000000000" \
+  --data-urlencode 'limit=20' \
+  "https://$GW/api/logs/v1/audit/loki/api/v1/query_range" | python3 -m json.tool | grep -E 'username|"verb"|subresource'
 ```
 
-Zero is what you want.
+A username and a verb coming back means it works. `user.username` is whoever authenticated; `impersonatedUser.username`, when present, is the person it was done for, and that is the one that matters.
 
-Then do something identifiable on a virtual machine, start or stop one, and look for it. In the console's Observe, Logs page, audit tenant:
+The console shows the same thing under Observe, Logs, audit tenant, but only on the cluster with the virtual machines. The hosting cluster has no Logs page, and after seven steps there that is the console you have open.
 
-```
-{log_type="audit"} |~ "<VM-NAME>" | json | log_source="kubeAPI"
-```
-
-The record carries `user.username` and, when one account acted for another, `impersonatedUser.username`. The second is the person; the first is whoever carried it out.
-
-In OVTools, open a virtual machine and read the Activity section. If it names nobody it says why, and the link goes to the part of the long page that covers it.
+In OVTools, open a virtual machine and read the Activity section. When it names nobody it says why, with a link.
 
 ## When it does not work
 
 | what you see | where to look |
 | --- | --- |
-| `ClusterLogForwarder` says `Ready`, nothing arrives | collector logs for `403`. The gateway validates a role the operator does not check |
-| nothing from the API server, only node records | on a hosted cluster, section **B**. On an ordinary one, the forwarder's `audit` input |
-| the drawer says you may not read the audit trail | reader access in **A** |
-| a snapshot deletion names no machine | the audit profile has to capture bodies. See the long page |
-| pause, unpause and softreboot never appear | they are instance subresources, not virtual machine ones. Check your filter names them correctly |
+| forwarder says `Ready`, nothing arrives | collector logs for `403` on the audit sink. The gateway checks `logging-collector-logs-writer`, which the operator's own validation does not |
+| only node records, nothing from the API server | on a hosted cluster, part **B**. On an ordinary one, the forwarder's `audit` input |
+| the Activity section says you may not read the audit trail | [Reader access](audit-pipeline-setup.md#reader-access) |
+| a snapshot deletion names no machine | the audit profile has to capture bodies: part **A** |
+| pause, unpause and softreboot never appear | those are instance subresources, not virtual machine ones. Check your filter names `virtualmachineinstances/pause` and not `virtualmachines/pause` |
