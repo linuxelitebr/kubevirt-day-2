@@ -2,6 +2,8 @@
 
 Commands, in order, with the cluster each one runs on. The reasons are in [audit-pipeline-setup.md](audit-pipeline-setup.md); this page assumes you want it working today.
 
+It is a lot of configuration for one question, and that is the design rather than an accident. Kubernetes keeps things in separate compartments and nothing crosses between them unless somebody says so. Every step below is one compartment being told where to send what it already holds. There is no single switch for this because there is no single place that knows all of it.
+
 **What this covers:** making a virtual machine's start, stop, restart and snapshot show the person who did it.
 
 **What it does not:** standing up the log store. That is operators, a bucket and a storage class, and it is written up properly in [Operators](audit-pipeline-setup.md#operators), [Object storage](audit-pipeline-setup.md#object-storage) and [LokiStack](audit-pipeline-setup.md#lokistack). Step 0 below tells you whether you already have it.
