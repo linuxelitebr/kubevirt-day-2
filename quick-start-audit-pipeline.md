@@ -313,4 +313,5 @@ In OVTools, open a virtual machine and read the Activity section. When it names 
 | only node records, nothing from the API server | on a hosted cluster, part **B**. On an ordinary one, the forwarder's `audit` input |
 | the Activity section says you may not read the audit trail | [Reader access](audit-pipeline-setup.md#reader-access) |
 | a snapshot deletion names no machine | the audit profile has to capture bodies: part **A** |
+| a collector pod restarts over and over, and its log just stops with no error | it was killed, not crashed. Exit 137 against the default 2Gi limit, which catching up on a backlog goes past. [Raise the limit](audit-pipeline-setup.md#the-collector-is-oomkilled) and leave the request where it is |
 | pause, unpause and softreboot never appear | those are instance subresources, not virtual machine ones. Check your filter names `virtualmachineinstances/pause` and not `virtualmachines/pause` |
