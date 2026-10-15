@@ -175,7 +175,25 @@ oc apply -f manifests/hosted-cluster-forwarder.yaml
 
 It goes in `openshift-logging`, not in the control plane namespace, where pod security rejects the collector outright.
 
-Confirm the receiver came up. The operator names its Service after the forwarder plus the input:
+Now check the apply actually produced a running collector, because this field is where a left-in placeholder bites. Nothing validates the URL: the apply accepts any string, and the collector only fails when Vector tries to build a URI out of it, which is a crash loop in another object several minutes later.
+
+```bash
+oc get clusterlogforwarder hosted-audit -n openshift-logging -o jsonpath='{.spec.outputs[?(@.name=="guest-loki")].loki.url}{"\n"}'
+```
+
+It has to read `https://<the host from B2>/api/logs/v1/audit`, with no angle brackets and no trailing slash. Angle brackets mean the placeholder is still there, and the symptom is `Configuration error. error=invalid uri character in sinks.output_guest_loki`.
+
+```bash
+oc get pods -n openshift-logging -l app.kubernetes.io/instance=hosted-audit
+```
+
+`Running` with no restarts. `CrashLoopBackOff` means the configuration is wrong rather than the pipeline, so read the pod's log before going further. Fixing the URL in place avoids re-editing the file:
+
+```bash
+oc patch clusterlogforwarder hosted-audit -n openshift-logging --type=json -p '[{"op":"replace","path":"/spec/outputs/0/loki/url","value":"https://<GATEWAY-HOST>/api/logs/v1/audit"}]'
+```
+
+Then confirm the receiver's Service exists. The operator names it after the forwarder plus the input:
 
 ```bash
 oc get svc -n openshift-logging -o name | grep hosted-audit
