@@ -1,6 +1,10 @@
-# Quick start: naming who did what
+# Quick start: naming who did what, on a hosted cluster
 
-Commands, in order, with the cluster each one runs on. The reasons are in [audit-pipeline-setup.md](audit-pipeline-setup.md); this page assumes you want it working today.
+**This page is for hosted clusters**, the HyperShift kind, where the API server runs as pods in another cluster. That topology is the only reason a short page exists: the records have to be carried across a cluster boundary, and no amount of configuring the cluster you are looking at will do it.
+
+**On an ordinary cluster, use [audit-pipeline-setup.md](audit-pipeline-setup.md) instead.** It is longer because it builds the whole thing, and on a single cluster there is nothing to carry anywhere. Step 1 below tells you which of the two you have, if you are not sure.
+
+Commands, in order, with the cluster each one runs on. The reasons are in the long page; this one assumes you want it working today.
 
 It is a lot of configuration for one question, and that is the design rather than an accident. Kubernetes keeps things in separate compartments and nothing crosses between them unless somebody says so. Every step below is one compartment being told where to send what it already holds. There is no single switch for this because there is no single place that knows all of it.
 
@@ -18,9 +22,9 @@ oc get hc -A
 
 It lists your hosted clusters on the hosting cluster, and answers `error: the server doesn't have a resource type "hc"` anywhere else.
 
-## Step 1: identify your clusters
+## Step 1: is this page for you
 
-Run this on each cluster you have:
+Run this on the cluster whose virtual machines you want named:
 
 ```bash
 oc get infrastructure cluster -o jsonpath='{.status.controlPlaneTopology}{"\n"}'
@@ -28,14 +32,14 @@ oc get infrastructure cluster -o jsonpath='{.status.controlPlaneTopology}{"\n"}'
 
 `External` means that cluster is a **hosted cluster**: its API server runs as pods somewhere else and writes its audit there. Anything else, `SingleReplica` or `HighlyAvailable`, means the control plane is that cluster's own.
 
-- Nothing answers `External`: you have an ordinary cluster. Do **A** on it and stop.
-- One answers `External`: that is the hosted cluster. Do **A** on it, then **B** on the cluster running its control plane, which is the hosting cluster. To find that one, run `oc get hc -A` on each cluster you have: it lists your hosted cluster by name only on the hosting cluster.
+- Not `External`: this is an ordinary cluster and this page is the wrong one. Go to [audit-pipeline-setup.md](audit-pipeline-setup.md).
+- `External`: carry on. You also need the cluster running its control plane, the hosting cluster. To find it, run `oc get hc -A` on each cluster you have: it lists your hosted cluster by name only there, and answers `error: the server doesn't have a resource type "hc"` everywhere else.
 
 Do not try to tell them apart by which one has virtual machines. With HyperShift on KubeVirt the hosting cluster runs the guest's nodes as virtual machines, and often others of its own, so `oc get vm` answers on both.
 
 ## Step 2: do you have a log store
 
-*On the hosted cluster, or on the ordinary one:*
+*On the hosted cluster:*
 
 ```bash
 oc get lokistack -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name}: {range .status.conditions[*]}{.type}={.status} {end}{"\n"}{end}'
@@ -55,19 +59,11 @@ oc get clusterlogforwarder -A -o jsonpath='{range .items[*]}{.metadata.namespace
 
 One of the pipelines has to take an `audit` input. Note the output name it sends to: the checks further down are written for an output called `default-lokistack`, which is what the shipped file uses. If yours is named something else, substitute it there. If no forwarder carries audit at all, [the forwarder section](audit-pipeline-setup.md#the-forwarder-with-the-filter-that-makes-this-affordable) has the whole file.
 
-## A. On the cluster with the virtual machines
+## A. The audit profile
 
-Power actions already carry a name once step 0 passes. Snapshot deletions do not, because the record names the snapshot and not the machine, and only the request body ties the two together. If you want those named, capture bodies for people and not for service accounts. This restarts the API server.
+Power actions already carry a name once step 2 passes. Snapshot deletions do not, because the record names the snapshot and not the machine, and only the request body ties the two together. If you want those named, the API server has to capture bodies, for people and not for service accounts. This restarts it.
 
-*On an ordinary cluster:*
-
-```bash
-oc patch apiserver cluster --type=merge -p '{"spec":{"audit":{"profile":"Default","customRules":[{"group":"system:serviceaccounts","profile":"Default"},{"group":"system:authenticated","profile":"WriteRequestBodies"}]}}}'
-```
-
-Order matters: a service account is also `system:authenticated`, so it has to match the narrower rule first.
-
-On a hosted cluster that object exists but is a copy: it is owned by the cluster-version-operator and the hosted API server never reads it, so patching it there is accepted and does nothing. The setting lives on the `HostedCluster`, on the hosting cluster. Do this one before B7 and you take a single API restart instead of two.
+The hosted cluster has its own `apiserver` object and patching it there does nothing: it is a copy owned by the cluster-version-operator and the hosted API server never reads it. The apply is accepted, which is the trap. The setting lives on the `HostedCluster`, on the hosting cluster. Do it before B7 and you take one API restart instead of two.
 
 *On the hosting cluster:*
 
@@ -75,19 +71,17 @@ On a hosted cluster that object exists but is a copy: it is owned by the cluster
 oc patch hostedcluster <HC-NAME> -n <HC-NAMESPACE> --type=merge -p '{"spec":{"configuration":{"apiServer":{"audit":{"profile":"Default","customRules":[{"group":"system:serviceaccounts","profile":"Default"},{"group":"system:authenticated","profile":"WriteRequestBodies"}]}}}}}'
 ```
 
-`<HC-NAME>` and `<HC-NAMESPACE>` come from the table in B. If you have not read them yet, skip this and come back after B's first block.
+`<HC-NAME>` and `<HC-NAMESPACE>` come from the table in B. If you have not read them yet, skip this and come back after B's first block. Order matters inside the patch: a service account is also `system:authenticated`, so it has to match the narrower rule first.
 
 Then check the collector is not being refused. Scope it to the audit sink: the application and infrastructure sinks produce their own errors on healthy clusters, and a `429` anywhere is backpressure rather than permission.
 
-*On the cluster with the virtual machines:*
+*On the hosted cluster:*
 
 ```bash
 oc logs -n openshift-logging -l app.kubernetes.io/component=collector --since=10m --tail=500 | grep -E 'output_default_lokistack_audit' | grep -iE 'error|403'
 ```
 
 No output is what you want. A `403` here means the collector's write role, which the long page covers.
-
-If this is an ordinary cluster, go to **Checking it worked**.
 
 ## B. Bringing the records across, hosted clusters only
 
@@ -267,7 +261,7 @@ No output is what you want.
 
 Start or stop a virtual machine, then ask the log store directly. The gateway authenticates with a bearer token, so this needs a session that has one: a kubeconfig that signs in with a client certificate makes `oc whoami -t` fail, and the request then goes out with an empty token and is rejected.
 
-*On the hosted cluster, or on the ordinary one. Not on the hosting cluster, which has no gateway:*
+*On the hosted cluster. Not on the hosting cluster, which has no gateway:*
 
 ```bash
 GW=$(oc get route -n openshift-logging -l app.kubernetes.io/component=lokistack-gateway -o jsonpath='{.items[0].spec.host}' 2>/dev/null)
@@ -312,7 +306,7 @@ In OVTools, open a virtual machine and read the Activity section. When it names 
 | what you see | where to look |
 | --- | --- |
 | forwarder says `Ready`, nothing arrives | collector logs for `403` on the audit sink. The gateway checks `logging-collector-logs-writer`, which the operator's own validation does not |
-| only node records, nothing from the API server | on a hosted cluster, part **B**. On an ordinary one, the forwarder's `audit` input |
+| only node records, nothing from the API server | part **B**. That is the whole reason this page exists |
 | the Activity section says you may not read the audit trail | [Reader access](audit-pipeline-setup.md#reader-access) |
 | a snapshot deletion names no machine | the audit profile has to capture bodies: part **A** |
 | a collector pod restarts over and over, and its log just stops with no error | it was killed, not crashed. Exit 137 against the default 2Gi limit, which catching up on a backlog goes past. [Raise the limit](audit-pipeline-setup.md#the-collector-is-oomkilled) and leave the request where it is |
