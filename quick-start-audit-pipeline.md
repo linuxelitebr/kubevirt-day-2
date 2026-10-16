@@ -4,6 +4,35 @@
 
 **On an ordinary cluster, use [audit-pipeline-setup.md](audit-pipeline-setup.md) instead.** It is longer because it builds the whole thing, and on a single cluster there is nothing to carry anywhere. Step 1 below tells you which of the two you have, if you are not sure.
 
+## What you are building
+
+```mermaid
+flowchart TB
+    subgraph hosting["HOSTING CLUSTER"]
+        kas["kube-apiserver of the guest<br/>pods in the control plane namespace"]
+        recv["ClusterLogForwarder hosted-audit<br/>in openshift-logging<br/>receiver input on 8443"]
+        kas -->|"audit webhook, HTTPS"| recv
+    end
+
+    subgraph guest["GUEST CLUSTER"]
+        gnodes["guest nodes<br/>auditd only"]
+        loki["LokiStack logging-loki<br/>audit tenant"]
+        ovt["OVTools"]
+        gnodes -.->|"all that arrives on its own"| loki
+        loki -->|"query_range, the person's own token"| ovt
+    end
+
+    recv ==>|"loki output, guest ServiceAccount token"| loki
+```
+
+Read it from the top right. The guest's API server does not run on the guest: it runs as pods on the cluster hosting it, so the record of who stopped a machine is written on the wrong side of the boundary, and nothing moves it on its own. Everything below is one hop at a time.
+
+The hop that surprises people is the second one. The collector lives in `openshift-logging` on the hosting cluster, **not** in the control plane namespace beside the API server it listens to. That namespace runs with a restricted policy and rejects the collector outright, so putting it there looks obvious and does not work.
+
+The dotted line is what the guest's audit tenant holds if you stop reading here: node records and nothing else. That is the state a correctly installed cluster is in before any of this, and it is why an empty activity list is not evidence of anything being broken.
+
+Note that both tokens in the picture are different and neither is interchangeable. The crossing writes with a ServiceAccount's token that belongs to the guest, and OVTools reads with the token of whoever is looking, which is what keeps one person's view from showing another's.
+
 Commands, in order, with the cluster each one runs on. The reasons are in the long page; this one assumes you want it working today.
 
 **There is a script that does most of this.** [`hcp-audit-pipeline.sh`](hcp-audit-pipeline.sh) runs against the hosting cluster, reads the guest's credentials out of the HostedCluster itself, and reports which of the pieces below are already there. It changes nothing until you pass `--apply`:
