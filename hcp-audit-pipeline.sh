@@ -57,6 +57,9 @@ Options:
       --apply          create what is missing (default: report only)
   -h, --help           this
 
+To see the hosted clusters and the namespaces they are in:
+  oc get hc -A
+
 Examples:
   hcp-audit-pipeline.sh hosted-lab
   hcp-audit-pipeline.sh -n clusters hosted-lab
@@ -111,7 +114,7 @@ ok "connected as ${WHO}"
 
 if [[ -z "$HC_NS" ]]; then
     HC_NS=$(host get hostedcluster -A --no-headers 2>/dev/null | awk -v n="$HC_NAME" '$2==n {print $1; exit}')
-    [[ -z "$HC_NS" ]] && die "No HostedCluster named ${HC_NAME}. Pass -n if it is somewhere unexpected."
+    [[ -z "$HC_NS" ]] && die "No HostedCluster named ${HC_NAME}. Run 'oc get hc -A' to see the names and their namespaces."
 fi
 exists host hostedcluster "$HC_NAME" "$HC_NS" || die "No HostedCluster ${HC_NAME} in ${HC_NS}."
 ok "HostedCluster ${HC_NS}/${HC_NAME}"
@@ -165,10 +168,15 @@ if ! exists guest namespace "$LOGGING_NS"; then
     MISSING=$((MISSING+1))
 fi
 
-if exists guest lokistack logging-loki "$LOGGING_NS"; then
-    ok "LokiStack logging-loki"
+# Found rather than assumed. The gateway's Route is named after the LokiStack,
+# so hard-coding one name would report a cluster that named its store something
+# else as having no store at all.
+LOKISTACK=$(guest get lokistack -n "$LOGGING_NS" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+if [[ -n "$LOKISTACK" ]]; then
+    ok "LokiStack ${LOKISTACK}"
 else
-    miss "LokiStack logging-loki on the guest"
+    LOKISTACK="logging-loki"
+    miss "no LokiStack in ${LOGGING_NS} on the guest"
     note "This is the store the records land in. See manifests/lokistack.yaml; not created here, it needs sizing and object storage decisions."
 fi
 
@@ -248,15 +256,22 @@ else
     note "The controller fills it a moment after the Secret appears. Run this again."
 fi
 
-GUEST_LOKI_HOST=$(guest get route logging-loki -n "$LOGGING_NS" -o jsonpath='{.spec.host}' 2>/dev/null)
+GUEST_LOKI_HOST=$(guest get route "$LOKISTACK" -n "$LOGGING_NS" -o jsonpath='{.spec.host}' 2>/dev/null)
 if [[ -n "$GUEST_LOKI_HOST" ]]; then
     GUEST_LOKI_URL="https://${GUEST_LOKI_HOST}/api/logs/v1/audit"
     ok "guest log store endpoint"
     note "${GUEST_LOKI_URL}"
 else
     GUEST_LOKI_URL=""
-    miss "route logging-loki on the guest"
+    miss "no route ${LOKISTACK} in ${LOGGING_NS} on the guest"
     note "Without it the collector has nowhere to send records."
+    # Seen at a customer: the store was still coming up and the route appeared a
+    # few minutes later. Worth saying, because otherwise the only way to tell a
+    # cluster that is still starting from one that is misconfigured is to ask
+    # somebody.
+    if guest get lokistack "$LOKISTACK" -n "$LOGGING_NS" >/dev/null 2>&1; then
+        note "The LokiStack is there, so this may just be still coming up. Run this again in a few minutes before treating it as wrong."
+    fi
 fi
 
 section "Hosting side: collecting and forwarding"
@@ -415,16 +430,36 @@ else
 fi
 
 section "Summary"
+
+# Anything created needs a moment before the cluster agrees it is there, and
+# the only honest way to know it took is to look again rather than to trust
+# that the writes returned without error.
+recheck_advice() {
+    printf '\n  %sWait about a minute, then check that it took:%s\n' "$BLUE" "$NC"
+    local cmd="  ${0}"
+    [[ -n "$CONTEXT" ]] && cmd+=" --context ${CONTEXT}"
+    [[ -n "$GUEST_SERVER_OVERRIDE" ]] && cmd+=" --guest-server ${GUEST_SERVER_OVERRIDE}"
+    [[ -n "$HC_NS" ]] && cmd+=" -n ${HC_NS}"
+    cmd+=" ${HC_NAME}"
+    printf '%s\n' "$cmd"
+    note "Same command without --apply. Objects take a few seconds to settle, and the hosted API server longer if you turned the webhook on."
+}
+
 if (( MISSING == 0 )); then
     printf '  %sEverything the crossing needs is in place.%s\n' "$GREEN" "$NC"
     if (( APPLIED > 0 )); then
-        note "Records take a few minutes to appear. Check with the query in quick-start-audit-pipeline.md."
+        recheck_advice
+        note "Records themselves take a few minutes more. The query for them is in quick-start-audit-pipeline.md."
     fi
     exit 0
 fi
+
 printf '  %s%d piece(s) still missing.%s\n' "$YELLOW" "$MISSING" "$NC"
 if ! $APPLY; then
     note "This was a check. Re-run with --apply to create what is missing."
+elif (( APPLIED > 0 )); then
+    recheck_advice
+    note "Some of what is still missing may just not have appeared yet; some this script will not create, because it needs decisions it cannot make."
 else
     note "Some pieces this script will not create, because they need decisions it cannot make."
 fi
