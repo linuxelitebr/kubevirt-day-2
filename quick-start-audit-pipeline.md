@@ -6,6 +6,14 @@
 
 Commands, in order, with the cluster each one runs on. The reasons are in the long page; this one assumes you want it working today.
 
+**There is a script that does most of this.** [`hcp-audit-pipeline.sh`](hcp-audit-pipeline.sh) runs against the hosting cluster, reads the guest's credentials out of the HostedCluster itself, and reports which of the pieces below are already there. It changes nothing until you pass `--apply`:
+
+```bash
+./hcp-audit-pipeline.sh <hosted-cluster-name>
+```
+
+Read it as the checklist on this page made executable, not as a replacement for it: when it says a piece is missing, this page is where you find out what that piece is for. Where the guest's published address is a load balancer your machine cannot route to, give it one that it can with `--guest-server`.
+
 It is a lot of configuration for one question, and that is the design rather than an accident. Kubernetes keeps things in separate compartments and nothing crosses between them unless somebody says so. Every step below is one compartment being told where to send what it already holds. There is no single switch for this because there is no single place that knows all of it.
 
 **What this covers:** making a virtual machine's start, stop, restart and snapshot show the person who did it.
