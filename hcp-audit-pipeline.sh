@@ -278,6 +278,10 @@ else
             if host patch hostedcluster "$HC_NAME" -n "$HC_NS" --type=merge \
                 -p '{"spec":{"configuration":{"apiServer":{"audit":{"profile":"Default","customRules":[{"group":"system:serviceaccounts","profile":"Default"},{"group":"system:authenticated","profile":"WriteRequestBodies"}]}}}}}' >/dev/null 2>&1; then
                 made "audit profile on the HostedCluster"
+                # Measured on a lab: the guest's own object catches up in about
+                # twenty seconds, and the API server finishes rolling around
+                # thirty-five. Only records written after that carry a body.
+                note "Test with a NEW snapshot. Records written before the API server finishes rolling never gain a body, so deleting an older snapshot will still show nothing and look like this did not work."
             else
                 bad "could not patch the audit profile"
             fi
@@ -471,7 +475,7 @@ recheck_advice() {
     [[ -n "$HC_NS" ]] && cmd+=" -n ${HC_NS}"
     cmd+=" ${HC_NAME}"
     printf '%s\n' "$cmd"
-    note "Same command without --apply. Objects take a few seconds to settle, and the hosted API server longer if you turned the webhook on."
+    note "Same command without --apply. Objects take a few seconds to settle, and the hosted API server about half a minute if you turned on the webhook or the audit profile, both of which restart it."
 }
 
 if (( MISSING == 0 )); then
