@@ -377,7 +377,9 @@ Same filter, opposite conclusions. Look at your own number.
 
 The `kubeAPIAudit` filter is a real Kubernetes audit policy running inside the collector. It decides what gets shipped, not what gets written, so the API server keeps its complete log on disk and you lose no forensic coverage by narrowing this.
 
-Rules are evaluated top to bottom and the first match wins:
+Rules are evaluated top to bottom and **the first match wins**, which makes the order the whole design rather than a matter of taste. Two rules sit above the one that drops service accounts, and they are there because a backup tool is a service account: put the drop first and the only record of your backups taking snapshots disappears, silently, while everything still looks configured.
+
+That is not hypothetical. It is what this page published until now, and what it was running on a customer.
 
 ```bash
 oc apply -f - <<'YAML'
@@ -417,10 +419,11 @@ spec:
           - RequestReceived
         omitResponseCodes: [404, 429]
         rules:
-          - level: None
-            userGroups:
-              - system:serviceaccounts
-              - system:nodes
+          # 1. Snapshots and restores, whoever did them. This HAS to come before
+          #    the service account drop below: a backup tool runs as a service
+          #    account, and dropping those first throws its snapshots away.
+          #    RequestResponse because the snapshot's name only exists in the
+          #    response body.
           - level: RequestResponse
             verbs: [create, delete]
             resources:
@@ -428,6 +431,26 @@ spec:
                 resources:
                   - virtualmachinesnapshots
                   - virtualmachinerestores
+          # 2. Powering a machine on or off, whoever did it, for the same
+          #    reason: a cold backup stops the machine, snapshots it and starts
+          #    it again, and without this the middle of that story is the only
+          #    part on record. Only the subresources a client calls, so
+          #    virt-controller's own writes do not come back in with them.
+          - level: Metadata
+            verbs: [create, update]
+            resources:
+              - group: subresources.kubevirt.io
+                resources:
+                  - virtualmachines/start
+                  - virtualmachines/stop
+                  - virtualmachines/restart
+          # 3. Everything else a service account or a node does is machine
+          #    traffic, and this is where the saving comes from.
+          - level: None
+            userGroups:
+              - system:serviceaccounts
+              - system:nodes
+          # 4. What is left is a person acting on a machine.
           - level: Metadata
             verbs: [create, update, patch, delete]
             resources:
@@ -863,13 +886,18 @@ Which means one rule at `RequestResponse` for snapshots, ahead of the `Metadata`
 
 ```yaml
         rules:
-          - level: None
-            userGroups: [system:serviceaccounts, system:nodes]
           - level: RequestResponse
             verbs: [create, delete]
             resources:
               - group: snapshot.kubevirt.io
                 resources: [virtualmachinesnapshots, virtualmachinerestores]
+          - level: Metadata
+            verbs: [create, update]
+            resources:
+              - group: subresources.kubevirt.io
+                resources: [virtualmachines/start, virtualmachines/stop, virtualmachines/restart]
+          - level: None
+            userGroups: [system:serviceaccounts, system:nodes]
           - level: Metadata
             verbs: [create, update, patch, delete]
             resources:
