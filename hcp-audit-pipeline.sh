@@ -256,6 +256,39 @@ else
     note "The controller fills it a moment after the Secret appears. Run this again."
 fi
 
+# Part A of the guide, and the script used to skip it, which is how a cluster
+# reported as fully set up still lost every snapshot deletion. Read from the
+# guest, because that is the effective state: what the API server actually
+# writes is what matters, not what was asked for somewhere else.
+#
+# Without bodies a deletion cannot be matched to its machine. A creation still
+# can, because the snapshot is still there to be named, so the fault shows up
+# as deletions silently missing while creations work.
+AUDIT_SPEC=$(guest get apiserver cluster -o jsonpath='{.spec.audit}' 2>/dev/null)
+if [[ "$AUDIT_SPEC" == *WriteRequestBodies* ]]; then
+    ok "the API server captures write bodies"
+else
+    miss "the API server does not capture write bodies"
+    note "Snapshot deletions will vanish and snapshots will have no name. Creations will look fine, which is what makes this hard to spot."
+    note "Part A of quick-start-audit-pipeline.md. It patches the HostedCluster and restarts the hosted API server."
+    if $APPLY; then
+        printf '\n  %sTurning this on restarts the hosted API server, the same window as the webhook step.%s\n' "$YELLOW" "$NC"
+        read -r -p "  Set the audit profile now? [y/N] " audit_answer
+        if [[ "$audit_answer" == "y" || "$audit_answer" == "Y" ]]; then
+            if host patch hostedcluster "$HC_NAME" -n "$HC_NS" --type=merge \
+                -p '{"spec":{"configuration":{"apiServer":{"audit":{"profile":"Default","customRules":[{"group":"system:serviceaccounts","profile":"Default"},{"group":"system:authenticated","profile":"WriteRequestBodies"}]}}}}}' >/dev/null 2>&1; then
+                made "audit profile on the HostedCluster"
+                # Measured on a lab: the guest's own object catches up in about
+                # twenty seconds, and the API server finishes rolling around
+                # thirty-five. Only records written after that carry a body.
+                note "Test with a NEW snapshot. Records written before the API server finishes rolling never gain a body, so deleting an older snapshot will still show nothing and look like this did not work."
+            else
+                bad "could not patch the audit profile"
+            fi
+        fi
+    fi
+fi
+
 GUEST_LOKI_HOST=$(guest get route "$LOKISTACK" -n "$LOGGING_NS" -o jsonpath='{.spec.host}' 2>/dev/null)
 if [[ -n "$GUEST_LOKI_HOST" ]]; then
     GUEST_LOKI_URL="https://${GUEST_LOKI_HOST}/api/logs/v1/audit"
@@ -442,7 +475,7 @@ recheck_advice() {
     [[ -n "$HC_NS" ]] && cmd+=" -n ${HC_NS}"
     cmd+=" ${HC_NAME}"
     printf '%s\n' "$cmd"
-    note "Same command without --apply. Objects take a few seconds to settle, and the hosted API server longer if you turned the webhook on."
+    note "Same command without --apply. Objects take a few seconds to settle, and the hosted API server about half a minute if you turned on the webhook or the audit profile, both of which restart it."
 }
 
 if (( MISSING == 0 )); then
