@@ -19,6 +19,16 @@
 #   ./vm-descheduler-exclude.sh verify lista.txt     confere template e pod
 #   ./vm-descheduler-exclude.sh undo   lista.txt     remove a annotation
 #
+# Alvo (segundo argumento):
+#   lista.txt          batch: todas as VMs da lista
+#   --vm NOME          individual: uma VM só (pode repetir: --vm a --vm b)
+#
+# Opção -i (com apply/undo): pergunta s/N antes de alterar cada VM.
+#
+# Exemplos:
+#   ./vm-descheduler-exclude.sh apply --vm minha-vm
+#   ./vm-descheduler-exclude.sh apply lista.txt -i
+#
 # lista.txt: um nome de VM por linha. Só a primeira coluna é lida (aceita a
 # exportação do vSphere com estado e DRS nas outras colunas). Linhas vazias e
 # começadas com # são ignoradas. Maiúsculas e minúsculas tanto faz.
@@ -34,9 +44,25 @@ OC=(oc --request-timeout=30s)
 
 die() { echo "ERRO: $*" >&2; exit 1; }
 
-modo=${1:-}; lista=${2:-}
-case "$modo" in plan|apply|verify|undo) ;; *) sed -n '2,26p' "$0"; exit 1 ;; esac
-[ -f "$lista" ] || die "lista não encontrada: $lista"
+uso() { sed -n '2,36p' "$0"; exit 1; }
+modo=${1:-}; shift || true
+case "$modo" in plan|apply|verify|undo) ;; *) uso ;; esac
+
+nomes=(); interativo=0; lista=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --vm) [ -n "${2:-}" ] || die "--vm precisa de um nome"; nomes+=("$2"); shift 2 ;;
+    -i) interativo=1; shift ;;
+    -*) die "opção desconhecida: $1" ;;
+    *) [ -z "$lista" ] || die "só uma lista por vez"; lista=$1; shift ;;
+  esac
+done
+if [ -n "$lista" ]; then
+  [ -f "$lista" ] || die "lista não encontrada: $lista"
+  while read -r linha; do nomes+=("$linha"); done < "$lista"
+fi
+[ ${#nomes[@]} -gt 0 ] || uso
+if [ $interativo -eq 1 ] && [ ! -t 0 ]; then die "-i precisa de terminal interativo"; fi
 
 echo "== perfil do descheduler"
 perfis=$("${OC[@]}" get kubedescheduler cluster -n openshift-kube-descheduler-operator -o jsonpath='{.spec.profiles}' 2>/dev/null)
@@ -54,7 +80,7 @@ inv=$(mktemp); trap 'rm -f "$inv"' EXIT
   || die "não consegui listar as VMs"
 
 alvos=(); faltando=(); ambiguos=()
-while read -r linha; do
+for linha in "${nomes[@]}"; do
   nome=$(printf '%s\n' "$linha" | awk '{print $1}' | tr '[:upper:]' '[:lower:]')
   [ -z "$nome" ] && continue
   case "$nome" in \#*) continue ;; esac
@@ -64,7 +90,7 @@ while read -r linha; do
   elif [ "$qtd" -gt 1 ]; then ambiguos+=("$nome: $(echo "$achados" | awk '{print $1}' | tr '\n' ' ')")
   else alvos+=("$achados")
   fi
-done < "$lista"
+done
 
 echo "== resumo da lista"
 echo "encontradas: ${#alvos[@]}   não encontradas: ${#faltando[@]}   ambíguas: ${#ambiguos[@]}"
@@ -85,6 +111,13 @@ echo "== $modo"
 for a in "${alvos[@]}"; do
   ref=${a%% *}; estado=${a#* }; ns=${ref%%/*}; vm=${ref##*/}
   atual=$("${OC[@]}" get vm "$vm" -n "$ns" -o jsonpath="{.spec.template.metadata.annotations.$JKEY}" 2>/dev/null)
+  if [ $interativo -eq 1 ] && { [ "$modo" = apply ] || [ "$modo" = undo ]; }; then
+    if { [ "$modo" = apply ] && [ "$atual" != "true" ]; } || { [ "$modo" = undo ] && [ "$atual" = "true" ]; }; then
+      read -r -p "  $modo em $ref ($estado)? [s/N] " resp
+      resp=${resp//$'\r'/}
+      case "$resp" in s|S|sim|y|Y) ;; *) echo "  $ref: pulada"; continue ;; esac
+    fi
+  fi
   case "$modo" in
     plan)
       if [ "$atual" = "true" ]; then echo "  $ref ($estado): já protegida"; else echo "  $ref ($estado): vai receber a annotation"; fi ;;

@@ -41,6 +41,8 @@ oc login https://api.<cluster>:6443
 ./vm-descheduler-exclude.sh plan vms.txt
 ./vm-descheduler-exclude.sh apply vms.txt
 ./vm-descheduler-exclude.sh verify vms.txt
+./vm-descheduler-exclude.sh apply --vm my-vm
+./vm-descheduler-exclude.sh apply vms.txt -i
 ```
 
 ## Notes

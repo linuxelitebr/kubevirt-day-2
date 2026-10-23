@@ -64,4 +64,15 @@ Names found in more than one namespace are reported and left alone.
 ./vm-descheduler-exclude.sh undo   vms.txt
 ```
 
+One VM at a time (repeat `--vm` for more), or the whole list with a `y/N`-style
+prompt before each change (`s` = yes, Enter = skip; needs a real terminal):
+
+```bash
+./vm-descheduler-exclude.sh apply --vm my-vm
+./vm-descheduler-exclude.sh apply vms.txt -i
+```
+
+The patch is a merge on `spec.template.metadata.annotations`, so the VM's other
+annotations (backup hooks and friends) stay put. `undo` removes only this key.
+
 Write-up with the full test: [DRS for OpenShift Virtualization](https://linuxelite.com.br/blog/drs-for-openshift-virtualization/).
