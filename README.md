@@ -27,6 +27,12 @@ oc login https://api.<hosting-cluster>:6443
 ./vm-runstrategy.sh --hosted-clusters --skip-hosting
 ```
 
+Each `--apply` writes a `rollback.sh` (one per cluster in a campaign: `<plan>/<cluster>/rollback.sh`). A hosted cluster's rollback runs with your `oc` session on the hosting cluster and fetches the hosted admin kubeconfig itself, like `--apply`. A standalone rollback runs with your session on that cluster.
+
+```bash
+bash runstrategy-campaign-<timestamp>/hosted__<namespace>__<hostedcluster>/rollback.sh
+```
+
 Why `RerunOnFailure` and not `Always`: [runStrategy in OpenShift Virtualization: when a VM restarts](https://linuxelite.com.br/blog/runstrategy-openshift-virtualization-kubevirt/).
 
 ## Backup Labels

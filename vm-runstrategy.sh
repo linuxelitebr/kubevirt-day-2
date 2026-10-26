@@ -60,6 +60,12 @@ credencial e gravada no plano: o --apply busca o kubeconfig de novo.
 O plano fica amarrado ao cluster em que foi auditado e o --apply recusa
 aplica-lo em outro. A auditoria salva o YAML integral de cada VM elegivel
 em DIR/backup/. Cada execucao registra uma linha em ./runstrategy-campaign.log.
+
+ROLLBACK:
+  Cada --apply gera DIR/rollback.sh (numa campanha, um por cluster em
+  DIR/<cluster>/rollback.sh). O de um hosted cluster roda com a sessao oc
+  no HOSTING cluster: ele busca o kubeconfig do hosted sozinho, como o --apply.
+  O de um cluster standalone roda com a sessao oc nesse cluster.
 EOF
   exit 1
 }
@@ -308,8 +314,29 @@ apply_plan() {
 
   local LOG="$PLAN/result.csv" RB="$PLAN/rollback.sh"
   echo "namespace,name,field,outcome,detail" > "$LOG"
-  { echo "#!/usr/bin/env bash"; echo "set -e"
-    echo "# rode com a sessao oc apontando para: $NOW_SERVER"; } > "$RB"; chmod +x "$RB"
+  local P_HOSTED
+  P_HOSTED=$(grep -m1 '^HOSTED_REF=' "$PLAN/origin.env" | cut -d= -f2-)
+  if [[ -n "$P_HOSTED" ]]; then
+    # rollback de hosted cluster: roda com a sessao oc no hosting cluster e
+    # busca o kubeconfig de admin do HostedCluster na hora, como o --apply
+    cat > "$RB" <<RBEOF
+#!/usr/bin/env bash
+# Rollback do hosted cluster $P_HOSTED ($NOW_SERVER).
+# Rode com a sessao oc no HOSTING cluster: o kubeconfig do hosted e buscado aqui.
+set -euo pipefail
+KC=\$(mktemp "\${TMPDIR:-/tmp}/runstrategy-rb.XXXXXX"); trap 'rm -f "\$KC"' EXIT
+SECRET=\$(oc get hostedcluster ${P_HOSTED##*/} -n ${P_HOSTED%%/*} -o jsonpath='{.status.kubeconfig.name}')
+oc get secret "\$SECRET" -n ${P_HOSTED%%/*} -o jsonpath='{.data.kubeconfig}' | base64 -d > "\$KC"
+[[ "\$(oc --kubeconfig "\$KC" config view --minify -o jsonpath='{.clusters[0].cluster.server}')" == "$NOW_SERVER" ]] \\
+  || { echo "ABORTADO: o kubeconfig obtido nao aponta para $NOW_SERVER" >&2; exit 1; }
+OC=(oc --kubeconfig "\$KC")
+RBEOF
+  else
+    { echo "#!/usr/bin/env bash"; echo "set -e"
+      echo "# rode com a sessao oc apontando para: $NOW_SERVER"
+      echo 'OC=(oc)'; } > "$RB"
+  fi
+  chmod +x "$RB"
 
   local OK=0 SKIP=0 FAIL=0
   echo "[*] APLICANDO plano $PLAN"
@@ -374,9 +401,9 @@ apply_plan() {
     OK=$((OK+1))
 
     if [[ "$field" == "runStrategy" ]]; then
-      echo "oc patch vm $name -n $ns --type=merge -p '{\"spec\":{\"runStrategy\":\"Always\"}}'" >> "$RB"
+      echo "\"\${OC[@]}\" patch vm $name -n $ns --type=merge -p '{\"spec\":{\"runStrategy\":\"Always\"}}'" >> "$RB"
     else
-      echo "oc patch vm $name -n $ns --type=json -p '[{\"op\":\"remove\",\"path\":\"/spec/runStrategy\"},{\"op\":\"add\",\"path\":\"/spec/running\",\"value\":true}]'" >> "$RB"
+      echo "\"\${OC[@]}\" patch vm $name -n $ns --type=json -p '[{\"op\":\"remove\",\"path\":\"/spec/runStrategy\"},{\"op\":\"add\",\"path\":\"/spec/running\",\"value\":true}]'" >> "$RB"
     fi
   done < "$PLAN/eligible.tsv"
 
