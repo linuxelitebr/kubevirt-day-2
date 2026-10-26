@@ -9,9 +9,19 @@
 #   --apply --plan DIR       Aplica o plano, revalidando cada VM contra o
 #                            estado registrado na auditoria.
 #
+# Alvos:
+#   (default)                o cluster da sessao oc corrente (standalone)
+#   --hosted-clusters        a partir de um hosting cluster (HCP): o proprio
+#                            hosting cluster e cada HostedCluster disponivel
+#   --hosted NS/NOME         a partir de um hosting cluster: so um HostedCluster
+#   --skip-hosting           com --hosted-clusters, nao audita o hosting cluster
+#
 # O apply nunca opera a partir do estado corrente do cluster. Ele opera a
 # partir do plano, e recusa qualquer VM cujo estado tenha mudado desde a
 # auditoria.
+#
+# As VMs que sao workers de hosted clusters (namespaces de control plane do
+# HCP) nunca entram no plano: quem cuida delas e a NodePool.
 #
 set -uo pipefail
 
@@ -19,29 +29,37 @@ CONTEXT=""; NAMESPACE=""; PLAN=""; APPLY=false; ONLY=""
 INCLUDE_NOT_RUNNING=false
 OUTDIR=""
 CAMPAIGN="./runstrategy-campaign.log"
+HOSTED_ALL=false; HOSTED_ONE=""; SKIP_HOSTING=false
 
 usage() {
   cat <<EOF
 AUDITORIA (default, somente leitura):
   $0 [--context CTX] [--namespace NS] [--only ns/nome] [--include-not-running] [--outdir DIR]
+  $0 --hosted-clusters [--skip-hosting] [--namespace NS] [--include-not-running] [--outdir DIR]
+  $0 --hosted NS/NOME [--namespace NS] [--only ns/nome] [--include-not-running] [--outdir DIR]
 
 APLICACAO:
   $0 --apply --plan DIR [--only ns/nome] [--context CTX]
 
   --context CTX          contexto oc
-  --namespace NS         restringe a um namespace
+  --namespace NS         restringe a um namespace (em cada cluster)
   --only ns/nome         restringe os elegiveis a um unico VM (canario)
   --include-not-running  promove a elegivel VMs Always fora de Running
   --outdir DIR           diretorio da auditoria
                          (default: ./runstrategy-<cluster>-<timestamp>)
   --plan DIR             diretorio de auditoria a aplicar
+  --hosted-clusters      roda no hosting cluster e em cada HostedCluster
+  --hosted NS/NOME       roda so no HostedCluster NS/NOME
+  --skip-hosting         com --hosted-clusters, pula o proprio hosting cluster
 
-Opera sobre a sessao oc corrente. Nao e necessario passar --context:
-faca oc login no cluster da vez e rode. O plano fica amarrado ao cluster
-em que foi auditado e o --apply recusa aplica-lo em outro.
+Opera sobre a sessao oc corrente. Para hosted clusters, faca oc login no
+hosting cluster: o script le o kubeconfig de admin de cada HostedCluster
+(status.kubeconfig) e usa uma copia temporaria, apagada ao sair. Nenhuma
+credencial e gravada no plano: o --apply busca o kubeconfig de novo.
 
-A auditoria salva o YAML integral de cada VM elegivel em DIR/backup/.
-Cada execucao registra uma linha em ./runstrategy-campaign.log.
+O plano fica amarrado ao cluster em que foi auditado e o --apply recusa
+aplica-lo em outro. A auditoria salva o YAML integral de cada VM elegivel
+em DIR/backup/. Cada execucao registra uma linha em ./runstrategy-campaign.log.
 EOF
   exit 1
 }
@@ -55,14 +73,31 @@ while [[ $# -gt 0 ]]; do
     --only) ONLY="$2"; shift 2 ;;
     --include-not-running) INCLUDE_NOT_RUNNING=true; shift ;;
     --outdir) OUTDIR="$2"; shift 2 ;;
+    --hosted-clusters) HOSTED_ALL=true; shift ;;
+    --hosted) HOSTED_ONE="$2"; shift 2 ;;
+    --skip-hosting) SKIP_HOSTING=true; shift ;;
     -h|--help) usage ;;
     *) echo "opcao desconhecida: $1" >&2; usage ;;
   esac
 done
 
 command -v jq >/dev/null || { echo "jq nao encontrado" >&2; exit 1; }
-OC=(oc); [[ -n "$CONTEXT" ]] && OC+=(--context "$CONTEXT")
 SCOPE=(-A); [[ -n "$NAMESPACE" ]] && SCOPE=(-n "$NAMESPACE")
+
+# sessao base: o cluster onde o usuario fez login (standalone ou hosting)
+BASE_OC=(oc); [[ -n "$CONTEXT" ]] && BASE_OC+=(--context "$CONTEXT")
+OC=("${BASE_OC[@]}")
+
+TMPKC=$(mktemp -d "${TMPDIR:-/tmp}/runstrategy-kc.XXXXXX")
+chmod 700 "$TMPKC"
+trap 'rm -rf "$TMPKC"' EXIT
+
+# epoch de um timestamp UTC ISO-8601, em GNU date e em BSD date (macOS)
+to_epoch() {
+  date -u -d "$1" +%s 2>/dev/null \
+    || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null \
+    || echo 0
+}
 
 cluster_id() {
   local id
@@ -72,6 +107,19 @@ cluster_id() {
          | sed -e 's#https\?://##' -e 's#^api\.##' -e 's#:[0-9]*$##' -e 's#[^A-Za-z0-9._-]#-#g')
   fi
   echo "${id:-desconhecido}"
+}
+
+# O cluster tem OpenShift Virtualization / KubeVirt?
+has_kubevirt() {
+  "${OC[@]}" get crd virtualmachines.kubevirt.io >/dev/null 2>&1
+}
+
+# Namespaces de control plane de HCP no cluster corrente (onde moram as VMs
+# dos workers dos hosted clusters). Lista JSON, vazia se nao for hosting.
+hcp_namespaces() {
+  "${OC[@]}" get hostedcluster -A -o json 2>/dev/null \
+    | jq -c '[.items[] | .metadata.namespace + "-" + .metadata.name]' 2>/dev/null \
+    || echo '[]'
 }
 
 # Falha cedo e com mensagem clara em vez de resultado parcial.
@@ -93,19 +141,54 @@ preflight() {
 campaign() { printf '%s\t%s\t%s\t%s\t%s\n' \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" "$3" "$4" >> "$CAMPAIGN"; }
 
+# --------------------------------------------------------- HOSTED CLUSTERS
+# Le o kubeconfig de admin de um HostedCluster (NS/NOME) a partir da sessao
+# base e grava numa copia temporaria. Imprime o caminho.
+fetch_hosted_kubeconfig() {
+  local ref="$1" ns name secret kc
+  ns="${ref%%/*}"; name="${ref##*/}"
+  secret=$("${BASE_OC[@]}" get hostedcluster "$name" -n "$ns" \
+             -o jsonpath='{.status.kubeconfig.name}' 2>/dev/null)
+  [[ -z "$secret" ]] && return 1
+  kc="$TMPKC/${ns}__${name}.kubeconfig"
+  ( umask 077
+    "${BASE_OC[@]}" get secret "$secret" -n "$ns" -o jsonpath='{.data.kubeconfig}' \
+      | base64 -d > "$kc" ) 2>/dev/null || return 1
+  [[ -s "$kc" ]] || return 1
+  echo "$kc"
+}
+
+# HostedClusters a processar, um NS/NOME por linha. So os disponiveis.
+list_hosted() {
+  if [[ -n "$HOSTED_ONE" ]]; then
+    echo "$HOSTED_ONE"; return
+  fi
+  "${BASE_OC[@]}" get hostedcluster -A -o json 2>/dev/null | jq -r '
+    .items[]
+    | select(any(.status.conditions[]?; .type=="Available" and .status=="True"))
+    | .metadata.namespace + "/" + .metadata.name'
+}
+
 # ---------------------------------------------------------------- AUDITORIA
 audit() {
   echo "[*] AUDITORIA - somente leitura, nenhum objeto sera modificado"
+  if ! has_kubevirt; then
+    echo "[*] cluster sem OpenShift Virtualization (CRD virtualmachines.kubevirt.io ausente). Nada a fazer."
+    return 0
+  fi
   preflight list
-  local ctx server cid
+  local ctx server cid hcpns
   ctx=$("${OC[@]}" config current-context 2>/dev/null)
   server=$("${OC[@]}" config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null)
   cid=$(cluster_id)
+  hcpns=$(hcp_namespaces)
   echo "[*] cluster:  $cid"
   echo "[*] servidor: $server"
+  [[ "$hcpns" != "[]" ]] && echo "[*] namespaces de control plane HCP (VMs de worker, excluidas): $(jq -r 'join(" ")' <<<"$hcpns")"
   [[ -z "$OUTDIR" ]] && OUTDIR="./runstrategy-${cid}-$(date +%Y%m%d-%H%M%S)"
   mkdir -p "$OUTDIR"
   { echo "CONTEXT=$ctx"; echo "SERVER=$server"; echo "CLUSTER=$cid"
+    echo "HOSTED_REF=${HOSTED_REF:-}"
     echo "AUDITED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"; } > "$OUTDIR/origin.env"
 
   "${OC[@]}" get vm  "${SCOPE[@]}" -o json > "$OUTDIR/vms.json"  || exit 1
@@ -114,7 +197,8 @@ audit() {
   echo "[*] VMs: $(jq '.items|length' "$OUTDIR/vms.json")   VMIs: $(jq '.items|length' "$OUTDIR/vmis.json")"
 
   jq -r --slurpfile v "$OUTDIR/vmis.json" \
-        --argjson inr "$INCLUDE_NOT_RUNNING" '
+        --argjson inr "$INCLUDE_NOT_RUNNING" \
+        --argjson hcpns "$hcpns" '
     ( $v[0].items | map({key:(.metadata.namespace+"/"+.metadata.name),
                          value:{uid:.metadata.uid, phase:.status.phase}}) | from_entries) as $vmi
     | [ .items[]
@@ -141,7 +225,8 @@ audit() {
           owners: $owners,
           managers: $mgrs,
           verdict: (
-              if   ($owners|length) > 0 then "BLOCK:owned-by-"+($owners|join("/"))
+              if   ($hcpns | index($vm.metadata.namespace)) != null then "BLOCK:hcp-worker-vm"
+              elif ($owners|length) > 0 then "BLOCK:owned-by-"+($owners|join("/"))
               elif ($ctrl|length)   > 0 then "BLOCK:managed-by-"+($ctrl|join("/"))
               elif ($st|test("^(Starting|Stopping|Terminating|Migrating|Provisioning|WaitingFor)")) then "BLOCK:transitional-"+$st
               elif $st=="Running"       then "ELIGIBLE"
@@ -157,11 +242,15 @@ audit() {
 
   echo
   echo "[*] Veredito:"
-  jq -r '.[].verdict' "$OUTDIR/plan.json" | sort | uniq -c | sort -rn | sed 's/^/    /'
-  echo
-  echo "[*] Detalhe:"
-  jq -r '.[] | [.verdict,(.namespace+"/"+.name),.status,(.managers|join(","))] | @tsv' \
-    "$OUTDIR/plan.json" | sort | column -t -s$'\t' | sed 's/^/    /'
+  if [[ $(jq 'length' "$OUTDIR/plan.json") -eq 0 ]]; then
+    echo "    nenhuma VM com runStrategy Always ou running: true"
+  else
+    jq -r '.[].verdict' "$OUTDIR/plan.json" | sort | uniq -c | sort -rn | sed 's/^/    /'
+    echo
+    echo "[*] Detalhe:"
+    jq -r '.[] | [.verdict,(.namespace+"/"+.name),.status,(.managers|join(","))] | @tsv' \
+      "$OUTDIR/plan.json" | sort | column -t -s$'\t' | sed 's/^/    /'
+  fi
 
   N=$(wc -l < "$OUTDIR/eligible.tsv" | tr -d ' ')
   echo
@@ -185,10 +274,9 @@ audit() {
   fi
 
   campaign AUDIT "$cid" \
-    "elegiveis=$N block=$(grep -c 'BLOCK' <(jq -r '.[].verdict' "$OUTDIR/plan.json")) skip=$(grep -c 'SKIP' <(jq -r '.[].verdict' "$OUTDIR/plan.json"))" \
+    "elegiveis=$N block=$(jq '[.[].verdict|select(startswith("BLOCK"))]|length' "$OUTDIR/plan.json") skip=$(jq '[.[].verdict|select(startswith("SKIP"))]|length' "$OUTDIR/plan.json")" \
     "$OUTDIR"
   echo "[*] Plano em:  $OUTDIR"
-  [[ "$N" -gt 0 ]] && echo "[*] Para aplicar: $0 --apply --plan $OUTDIR"
 }
 
 # ---------------------------------------------------------------- APLICACAO
@@ -212,7 +300,7 @@ apply_plan() {
     exit 1
   fi
 
-  local age=$(( $(date -u +%s) - $(date -u -d "$P_AT" +%s 2>/dev/null || echo 0) ))
+  local age=$(( $(date -u +%s) - $(to_epoch "$P_AT") ))
   if [[ $age -gt 1800 ]]; then
     echo "[!] AVISO: plano auditado ha $((age/60)) minutos ($P_AT)."
     echo "[!] O estado do cluster muda. Considere reauditar antes de aplicar."
@@ -220,7 +308,8 @@ apply_plan() {
 
   local LOG="$PLAN/result.csv" RB="$PLAN/rollback.sh"
   echo "namespace,name,field,outcome,detail" > "$LOG"
-  { echo "#!/usr/bin/env bash"; echo "set -e"; } > "$RB"; chmod +x "$RB"
+  { echo "#!/usr/bin/env bash"; echo "set -e"
+    echo "# rode com a sessao oc apontando para: $NOW_SERVER"; } > "$RB"; chmod +x "$RB"
 
   local OK=0 SKIP=0 FAIL=0
   echo "[*] APLICANDO plano $PLAN"
@@ -297,7 +386,95 @@ apply_plan() {
     "ok=$OK skip=$SKIP fail=$FAIL" "$PLAN"
   echo "[*] Log: $LOG"
   echo "[*] Rollback: $RB"
-  [[ $FAIL -eq 0 ]] || exit 1
+  [[ $FAIL -eq 0 ]]
 }
 
-if $APPLY; then apply_plan; else audit; fi
+# --------------------------------------------------------------- MULTI-CLUSTER
+# Auditoria em varios clusters: um subdiretorio de plano por cluster e um
+# clusters.tsv (subdir, tipo, HostedCluster) na raiz da campanha.
+audit_multi() {
+  local root="${OUTDIR:-./runstrategy-campaign-$(date +%Y%m%d-%H%M%S)}"
+  mkdir -p "$root"; : > "$root/clusters.tsv"
+  "${BASE_OC[@]}" whoami >/dev/null 2>&1 || {
+    echo "ABORTADO: sessao oc invalida. Faca oc login no hosting cluster." >&2; exit 1; }
+  "${BASE_OC[@]}" get crd hostedclusters.hypershift.openshift.io >/dev/null 2>&1 || {
+    echo "ABORTADO: a sessao corrente nao e um hosting cluster (sem CRD HostedCluster)." >&2
+    echo "  Para um cluster standalone, rode sem --hosted-clusters/--hosted." >&2; exit 1; }
+
+  if $HOSTED_ALL && ! $SKIP_HOSTING; then
+    echo "================ hosting cluster"
+    OC=("${BASE_OC[@]}"); HOSTED_REF=""; OUTDIR="$root/hosting"
+    audit && printf 'hosting\thosting\t-\n' >> "$root/clusters.tsv"
+    echo
+  fi
+
+  local refs ref kc sub
+  refs=$(list_hosted)
+  [[ -z "$refs" ]] && echo "[*] nenhum HostedCluster disponivel encontrado"
+  while IFS= read -r ref; do
+    [[ -z "$ref" ]] && continue
+    echo "================ hosted cluster $ref"
+    if ! kc=$(fetch_hosted_kubeconfig "$ref"); then
+      echo "[!] nao foi possivel obter o kubeconfig de $ref (status.kubeconfig vazio ou sem acesso ao Secret). Pulando."
+      echo; continue
+    fi
+    sub="hosted__${ref//\//__}"
+    OC=(oc --kubeconfig "$kc"); HOSTED_REF="$ref"; OUTDIR="$root/$sub"
+    audit && printf '%s\thosted\t%s\n' "$sub" "$ref" >> "$root/clusters.tsv"
+    echo
+  done <<< "$refs"
+
+  echo "================ resumo"
+  local total=0 n
+  while IFS=$'\t' read -r sub kind ref; do
+    [[ -f "$root/$sub/eligible.tsv" ]] || continue
+    n=$(wc -l < "$root/$sub/eligible.tsv" | tr -d ' '); total=$((total+n))
+    [[ "$ref" == "-" ]] && ref=""
+    printf '    %-40s elegiveis: %s\n' "$sub${ref:+ ($ref)}" "$n"
+  done < "$root/clusters.tsv"
+  echo "[*] Elegiveis no total: $total"
+  echo "[*] Campanha em: $root"
+  [[ $total -gt 0 ]] && echo "[*] Para aplicar: $0 --apply --plan $root"
+  return 0
+}
+
+apply_multi() {
+  local root="$PLAN" rc=0 sub kind ref kc
+  "${BASE_OC[@]}" whoami >/dev/null 2>&1 || {
+    echo "ABORTADO: sessao oc invalida. Faca oc login no hosting cluster da auditoria." >&2; exit 1; }
+  while IFS=$'\t' read -r sub kind ref; do
+    [[ -z "$sub" ]] && continue
+    [[ -f "$root/$sub/eligible.tsv" ]] || continue
+    if [[ ! -s "$root/$sub/eligible.tsv" ]]; then
+      echo "[*] $sub: nenhum elegivel, nada a aplicar"; continue
+    fi
+    [[ "$ref" == "-" ]] && ref=""
+    echo "================ $sub${ref:+ ($ref)}"
+    if [[ "$kind" == "hosted" ]]; then
+      if ! kc=$(fetch_hosted_kubeconfig "$ref"); then
+        echo "[!] nao foi possivel obter o kubeconfig de $ref. Pulando." >&2; rc=1; continue
+      fi
+      OC=(oc --kubeconfig "$kc")
+    else
+      OC=("${BASE_OC[@]}")
+    fi
+    PLAN="$root/$sub"
+    apply_plan || rc=1
+    echo
+  done < "$root/clusters.tsv"
+  return $rc
+}
+
+# -------------------------------------------------------------------- MAIN
+HOSTED_REF=""
+if $APPLY; then
+  if [[ -n "$PLAN" && -f "$PLAN/clusters.tsv" ]]; then apply_multi; else apply_plan; fi
+elif $HOSTED_ALL || [[ -n "$HOSTED_ONE" ]]; then
+  [[ -n "$ONLY" && "$HOSTED_ALL" == true ]] && {
+    echo "--only nao combina com --hosted-clusters; use --hosted NS/NOME --only ns/vm" >&2; exit 1; }
+  audit_multi
+else
+  audit
+  [[ -s "${OUTDIR}/eligible.tsv" ]] && echo "[*] Para aplicar: $0 --apply --plan $OUTDIR"
+  exit 0
+fi

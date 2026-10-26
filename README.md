@@ -14,6 +14,21 @@ oc login https://api.<cluster>:6443
 ./vm-runstrategy.sh --only fencing-lab/vm-always
 ```
 
+From a Hosted Control Planes hosting cluster, audit the hosting cluster and every available HostedCluster. The script reads each hosted cluster's admin kubeconfig from `status.kubeconfig` into a temporary file and deletes it on exit. VMs in HCP control plane namespaces (the hosted clusters' worker VMs) are always blocked: the NodePool owns them.
+
+```bash
+oc login https://api.<hosting-cluster>:6443
+./vm-runstrategy.sh --hosted-clusters
+./vm-runstrategy.sh --apply --plan runstrategy-campaign-<timestamp>
+```
+
+```bash
+./vm-runstrategy.sh --hosted <namespace>/<hostedcluster>
+./vm-runstrategy.sh --hosted-clusters --skip-hosting
+```
+
+Why `RerunOnFailure` and not `Always`: [runStrategy in OpenShift Virtualization: when a VM restarts](https://linuxelite.com.br/blog/runstrategy-openshift-virtualization-kubevirt/).
+
 ## Backup Labels
 
 ```bash
