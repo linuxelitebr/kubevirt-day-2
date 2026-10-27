@@ -14,9 +14,15 @@
 #   virt-launcher pod  counts right now for the scheduler
 # The rule goes to the VM template. With LiveUpdate KubeVirt copies it to the
 # running VMI on its own; the running pod keeps its old spec (pod specs are
-# immutable), so the rule binds from the next migration or restart on. The
-# rule lists the namespaces of the group: without that, a pod (anti-)affinity
-# term only sees pods in its own namespace.
+# immutable), so the rule binds from the next migration or restart on.
+#
+# The rule uses matchExpressions (key In [group]), the same shape the console's
+# affinity editor writes, so the console shows it. A group spread over several
+# namespaces also gets a namespaces list (without it, a term only sees its own
+# namespace); the console cannot show that field and drops it when someone saves
+# the VM's affinity there. 'verify' flags it and 'apply' puts it back. Rules
+# written by older versions of this script (matchLabels) are recognized and
+# converted by 'apply'.
 #
 # Things the rules do not do on their own, and how this script covers them:
 #   - Affinity is IgnoredDuringExecution: VMs that already break a rule stay
@@ -198,7 +204,11 @@ field_of() { [ "$1" = anti ] && echo podAntiAffinity || echo podAffinity; }
 
 # affinity JSON on stdin -> same without the terms that select on $key
 JQ_STRIP='
-def keep($k): map(select(((.labelSelector // .podAffinityTerm.labelSelector // {}).matchLabels // {}) | has($k) | not));
+# A term is ours when its selector uses our key, in either form: matchLabels
+# (older runs of this script) or matchExpressions (current, what the console shows).
+def mine($k): (.labelSelector // .podAffinityTerm.labelSelector // {}) as $s
+  | (($s.matchLabels // {}) | has($k)) or ([$s.matchExpressions[]? | .key] | index($k) != null);
+def keep($k): map(select(mine($k) | not));
 def strip($k):
   (. // {})
   | reduce ("podAffinity","podAntiAffinity") as $t (.;
@@ -207,7 +217,12 @@ def strip($k):
           if .[$f] == null then . else (.[$f] |= keep($k)) | (if (.[$f] | length) == 0 then del(.[$f]) else . end) end)
         | (if (.[$t] | length) == 0 then del(.[$t]) else . end)
       end);
-def term($k; $g; $ns): {labelSelector: {matchLabels: {($k): $g}}, namespaces: $ns, topologyKey: $host};
+# matchExpressions, not matchLabels: same pods selected, and it is the only form
+# the console affinity editor can display (it shows matchLabels rules as empty).
+# namespaces only when the group spans more than one: without the field a term
+# already looks at its own namespace, and that is exactly what the console writes.
+def term($k; $g; $ns): {labelSelector: {matchExpressions: [{key: $k, operator: "In", values: [$g]}]}}
+  + (if ($ns | length) > 1 then {namespaces: $ns} else {} end) + {topologyKey: $host};
 def add($t; $rule; $k; $g; $ns):
   if $rule == "required" then .[$t].requiredDuringSchedulingIgnoredDuringExecution += [term($k; $g; $ns)]
   else .[$t].preferredDuringSchedulingIgnoredDuringExecution += [{weight: 100, podAffinityTerm: term($k; $g; $ns)}] end;
@@ -220,11 +235,22 @@ desired_affinity() { # current-affinity-json kind rule group ns-json
 stripped_affinity() { # current-affinity-json kind
   jq -c --arg k "$(key_of "$2")" --arg host "$HOST_KEY" "$JQ_STRIP strip(\$k) | norm" <<<"$1"
 }
-has_rule() { # affinity-json kind rule group -> exit status
-  jq -e --arg k "$(key_of "$2")" --arg t "$(field_of "$2")" --arg rule "$3" --arg g "$4" '
-    if $rule == "required" then [.[$t].requiredDuringSchedulingIgnoredDuringExecution[]? | select(.labelSelector.matchLabels[$k] == $g)]
-    else [.[$t].preferredDuringSchedulingIgnoredDuringExecution[]? | select(.podAffinityTerm.labelSelector.matchLabels[$k] == $g)] end
-    | length > 0' <<<"$1" >/dev/null
+rule_state() { # affinity-json kind rule group ns-json -> ok | old-format | no-namespaces | missing
+  jq -r --arg k "$(key_of "$2")" --arg t "$(field_of "$2")" --arg rule "$3" --arg g "$4" --argjson ns "$5" '
+    (if $rule == "required" then [.[$t].requiredDuringSchedulingIgnoredDuringExecution[]?]
+     else [.[$t].preferredDuringSchedulingIgnoredDuringExecution[]? | .podAffinityTerm] end) as $terms
+    | ($terms | map(select(.labelSelector.matchExpressions == [{key: $k, operator: "In", values: [$g]}]))) as $new
+    | if ($new | map(select(((.namespaces // []) | sort) == ($ns | sort) or (($ns | length) == 1 and ((.namespaces // []) | length) == 0))) | length) > 0 then "ok"
+      elif ($new | length) > 0 then "no-namespaces"
+      elif ($terms | map(select(.labelSelector.matchLabels[$k]? == $g)) | length) > 0 then "old-format"
+      else "missing" end' <<<"${1:-null}"
+}
+# pod (anti-)affinity terms whose selector selects every pod: an empty labelSelector.
+# The console leaves these behind when it saves a rule it could not read.
+empty_selectors() { # affinity-json -> count
+  jq -r '[(.podAffinity, .podAntiAffinity)? // empty
+    | (.requiredDuringSchedulingIgnoredDuringExecution[]?, .preferredDuringSchedulingIgnoredDuringExecution[]?.podAffinityTerm)
+    | (.labelSelector // {}) | select(((.matchLabels // {}) | length) == 0 and ((.matchExpressions // []) | length) == 0)] | length' <<<"${1:-null}"
 }
 
 vmi_json()   { "${OC[@]}" get vmi "$2" -n "$1" -o json 2>/dev/null; }
@@ -322,7 +348,10 @@ stale_members() { # id
 JQ_TERMS='[ (. // {}) as $aff | ("podAffinity", "podAntiAffinity") as $t
   | ( ($aff[$t].requiredDuringSchedulingIgnoredDuringExecution[]? | {r: "required", s: .}),
       ($aff[$t].preferredDuringSchedulingIgnoredDuringExecution[]? | {r: "preferred", s: .podAffinityTerm}) )
-  | .r as $r | (.s.labelSelector.matchLabels // {}) | to_entries[] | select(.key == $a or .key == $b)
+  | .r as $r | .s.labelSelector as $l
+  | ( (($l.matchLabels // {}) | to_entries[] | {key, value}),
+      ($l.matchExpressions[]? | select(.operator == "In") | {key, value: .values[]}) )
+  | select(.key == $a or .key == $b)
   | "\(.key)=\(.value) (\($r))"] | sort | unique'
 stale_pods() { # -> "ns/vm key=value,..." per pod; non-zero exit if the check could not run
   # The VMI list goes through a file: on a large cluster it does not fit in a
@@ -355,20 +384,24 @@ report_stale() {
 
 # ---------- verify ----------
 verify_group() { # id -> prints, bumps failures
-  local id=$1 kind=${G_KIND[$1]} rule=${G_RULE[$1]} group=${1#*/} key ref ns name vm vmi pod tl va pl here problems placement=()
+  local id=$1 kind=${G_KIND[$1]} rule=${G_RULE[$1]} group=${1#*/} key ref ns name vm vmi pod tl va pl here st es problems placement=()
   key=$(key_of "$kind")
   for ref in ${G_MEMBERS[$id]}; do
     ns=${ref%%/*}; name=${ref#*/}; problems=()
     vm=$("${OC[@]}" get vm "$name" -n "$ns" -o json)
     tl=$(jq -r --arg k "$key" '.spec.template.metadata.labels[$k] // ""' <<<"$vm")
     [ "$tl" = "$group" ] || problems+=("template label=${tl:-none}")
-    has_rule "$(jq -c '.spec.template.spec.affinity' <<<"$vm")" "$kind" "$rule" "$group" || problems+=("template rule missing")
+    st=$(rule_state "$(jq -c '.spec.template.spec.affinity' <<<"$vm")" "$kind" "$rule" "$group" "${G_NS[$id]}")
+    [ "$st" = ok ] || problems+=("template rule $st")
+    es=$(empty_selectors "$(jq -c '.spec.template.spec.affinity' <<<"$vm")")
+    [ "$es" -eq 0 ] || problems+=("$es affinity term(s) with an empty selector, which matches every pod in the namespace (left by a console save?)")
     vmi=$(vmi_json "$ns" "$name"); va="-"; pl="no pod"; here="not running"
     if [ -n "$vmi" ]; then
       va=$(jq -r --arg k "$key" '.metadata.labels[$k] // ""' <<<"$vmi")
       [ "$va" = "$group" ] || problems+=("VMI label=${va:-none}")
       if [ "$rollout" = LiveUpdate ]; then
-        has_rule "$(jq -c '.spec.affinity' <<<"$vmi")" "$kind" "$rule" "$group" || problems+=("VMI rule missing")
+        st=$(rule_state "$(jq -c '.spec.affinity' <<<"$vmi")" "$kind" "$rule" "$group" "${G_NS[$id]}")
+        [ "$st" = ok ] || problems+=("VMI rule $st")
       fi
       pod=$(active_pod "$ns" "$vmi")
       if [ -n "$pod" ]; then

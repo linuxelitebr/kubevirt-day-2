@@ -66,6 +66,27 @@ the file.
 cluster. It needs bash 4+, `jq` and `oc`. Exit codes: 0 clean, 1 bad input, 2 finished
 with problems.
 
+## The rule shape, and the console
+
+The script writes the rule as `matchExpressions` (`key In [group]`), the same shape
+the console's affinity editor writes ("Workload (pod) Anti-Affinity", "Workload
+labels"), so the VM's Scheduling tab shows the key, the operator and the group.
+Earlier versions wrote `matchLabels`: same pods selected, but the console's editor
+only reads `matchExpressions` and showed those rules with no details. `apply`
+recognizes and converts the old form.
+
+Two console behaviors to know. Both come from reading the kubevirt-plugin source
+(release-4.21); the rule shape itself was confirmed with a rule created in the console:
+
+- **It does not keep `namespaces`.** The script only adds that field for groups that
+  span namespaces (without it, a term only sees its own namespace). Saving that VM's
+  affinity in the console drops it. `verify` reports `rule no-namespaces`; `apply`
+  restores it.
+- **It cannot read `matchLabels` rules**, so saving the affinity of a VM that still
+  has one leaves a term with an empty selector, which matches every pod in the
+  namespace. `verify` warns about any empty-selector term; it does not delete it,
+  since it may not be the script's.
+
 ## What the rules do not do on their own
 
 Each of these showed up while testing, and the script handles it:
