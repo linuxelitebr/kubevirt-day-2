@@ -66,6 +66,16 @@ Why `RerunOnFailure` and not `Always`: [runStrategy in OpenShift Virtualization:
 ./vm-descheduler-exclude.sh apply vms.txt -i
 ```
 
+## VM Affinity Groups
+
+```bash
+./vm-affinity-groups.sh plan -f groups.txt --prefix example.com
+./vm-affinity-groups.sh apply -f groups.txt --prefix example.com
+./vm-affinity-groups.sh fix -f groups.txt --prefix example.com
+./vm-affinity-groups.sh undo -f groups.txt --prefix example.com
+./vm-affinity-groups.sh renew --prefix example.com
+```
+
 ## Notes
 
 - [windows-forklift-tuning.md](windows-forklift-tuning.md): what to add to a Windows VM after a Forklift migration, and why each field.
@@ -73,3 +83,4 @@ Why `RerunOnFailure` and not `Always`: [runStrategy in OpenShift Virtualization:
 - [audit-log-retention.md](audit-log-retention.md): where the audit log lives, why its window is so short, and what you can do about it.
 - [audit-pipeline-setup.md](audit-pipeline-setup.md): standing up Loki and a log forwarder so the audit log survives long enough to answer a question, shipping only the part worth keeping.
 - [descheduler-exclude-vms.md](descheduler-exclude-vms.md): keeping specific VMs out of descheduler balancing, and why it only works with `KubeVirtRelieveAndMigrate`.
+- [vm-affinity-groups.md](vm-affinity-groups.md): keeping groups of VMs apart or together on running VMs, why the label has to be on the template, the VMI and the pod, and what the rules do not do on their own.

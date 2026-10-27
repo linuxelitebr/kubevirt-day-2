@@ -1,0 +1,11 @@
+# Groups for vm-affinity-groups.sh, one per line.
+# kind      group     rule        members (name or namespace/name)
+#
+# kind:  anti      keep the members on different nodes
+#        affinity  keep the members on the same node
+# rule:  required  hard rule (anti: needs a node per member, plus a spare for drains)
+#        preferred soft rule ('fix' corrects what the scheduler did not)
+#
+anti        db        required    db-1 db-2 db-3
+anti        dns       preferred   prod/dns-1 dr/dns-2
+affinity    app-web   preferred   app-1 web-1
