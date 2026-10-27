@@ -324,22 +324,30 @@ JQ_TERMS='[ (. // {}) as $aff | ("podAffinity", "podAntiAffinity") as $t
       ($aff[$t].preferredDuringSchedulingIgnoredDuringExecution[]? | {r: "preferred", s: .podAffinityTerm}) )
   | .r as $r | (.s.labelSelector.matchLabels // {}) | to_entries[] | select(.key == $a or .key == $b)
   | "\(.key)=\(.value) (\($r))"] | sort | unique'
-stale_pods() { # -> "ns/vm key=value,..." per pod
-  local pods vmis
-  pods=$("${OC[@]}" get pods -A -l kubevirt.io=virt-launcher --field-selector=status.phase=Running -o json) || return
-  vmis=$("${OC[@]}" get vmi -A -o json) || return
-  jq -r --arg a "$KEY_ANTI" --arg b "$KEY_AFF" --argjson vmis "$vmis" "
+stale_pods() { # -> "ns/vm key=value,..." per pod; non-zero exit if the check could not run
+  # The VMI list goes through a file: on a large cluster it does not fit in a
+  # command-line argument ("Argument list too long").
+  local pods vmis rc
+  vmis=$(mktemp) || return 1
+  pods=$("${OC[@]}" get pods -A -l kubevirt.io=virt-launcher --field-selector=status.phase=Running -o json) \
+    && "${OC[@]}" get vmi -A -o json > "$vmis" \
+    || { rm -f "$vmis"; return 1; }
+  jq -r --arg a "$KEY_ANTI" --arg b "$KEY_AFF" --slurpfile vmis "$vmis" "
     def terms: $JQ_TERMS;
-    (\$vmis.items | map({key: \"\(.metadata.namespace)/\(.metadata.name)\", value: (.spec.affinity | terms)}) | from_entries) as \$want
+    (\$vmis[0].items | map({key: \"\(.metadata.namespace)/\(.metadata.name)\", value: (.spec.affinity | terms)}) | from_entries) as \$want
     | .items[]
     | (\"\(.metadata.namespace)/\(.metadata.labels[\"vm.kubevirt.io/name\"])\") as \$ref
     | (.spec.affinity | terms) as \$have
     | (\$have - (\$want[\$ref] // [])) as \$extra
     | select(\$extra | length > 0)
     | \"\(\$ref) \(\$extra | join(\",\"))\"" <<<"$pods"
+  rc=$?
+  rm -f "$vmis"
+  return $rc
 }
 report_stale() {
-  local lines; lines=$(stale_pods)
+  local lines
+  if ! lines=$(stale_pods); then echo "  ERROR: could not check the running pods for outdated rules"; failures=$((failures+1)); return; fi
   if [ -z "$lines" ]; then echo "  no running pod carries an outdated rule"; return; fi
   echo "  running pods with an outdated rule (pod specs are immutable; 'renew' replaces them with a live migration):"
   sed 's/^/    /' <<<"$lines"; failures=$((failures+1))
@@ -449,8 +457,8 @@ echo "== prefix: $prefix   schedulable nodes: $eligible_nodes   rollout: ${rollo
 # renew outdated pods first, so the placement fixes below see the current rules
 if [ "$mode" = fix ] || [ "$mode" = renew ]; then
   echo; echo "== outdated rules in running pods"
-  stale=$(stale_pods)
-  if [ -z "$stale" ]; then echo "  none"
+  if ! stale=$(stale_pods); then echo "  ERROR: could not check the running pods for outdated rules"; failures=$((failures+1)); stale=""
+  elif [ -z "$stale" ]; then echo "  none"
   else
     sed 's/^/  /' <<<"$stale"
     ok=$assume_yes
