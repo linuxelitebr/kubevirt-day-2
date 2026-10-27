@@ -1101,6 +1101,61 @@ The pods need recreating to pick up new limits:
 oc delete pod -n openshift-logging -l app.kubernetes.io/component=collector
 ```
 
+#### When raising the limit does not help
+
+Measured in the field: 4Gi, then 8Gi, still killed. At that point the limit is not the problem. The collector is trying to deliver a backlog that grew while the log store was unreachable, and the backlog is bigger than any limit worth setting. Raising it further just moves the ceiling.
+
+Two things feed that backlog, and clearing only one of them does nothing. The collector keeps its buffer and its read checkpoints in a directory on each node, and the node still holds the log files themselves. Delete the buffer alone and the collector re-reads the files from the start, which is the same pile by another route.
+
+The order matters. Take the forwarder away first, so nothing is running while you clear, and **save it first**, because deleting it is the only way to stop the collector and there is no copy anywhere else:
+
+```bash
+oc get clusterlogforwarder logging -n openshift-logging -o yaml | python3 -c "
+import sys,yaml
+d=yaml.safe_load(sys.stdin); d.pop('status',None)
+m=d['metadata']
+for k in ('creationTimestamp','resourceVersion','uid','generation','managedFields','selfLink'): m.pop(k,None)
+a=m.get('annotations',{}); a.pop('kubectl.kubernetes.io/last-applied-configuration',None)
+if not a: m.pop('annotations',None)
+print(yaml.safe_dump(d,sort_keys=False))" > /tmp/clf-logging.yaml
+```
+
+Check it came out with something in it before going further, then remove the forwarder and wait for the collectors to go:
+
+```bash
+oc delete clusterlogforwarder logging -n openshift-logging
+```
+
+```bash
+oc get pods -n openshift-logging -l app.kubernetes.io/component=collector -w
+```
+
+Then clear both the sources and the collector's own state, on every node:
+
+```bash
+oc get nodes -o name | while IFS= read -r n; do echo "== $n"; oc debug "$n" -- chroot /host bash -c 'journalctl --vacuum-time=2h; find /var/log/containers/ -name "*.log" -mmin +120 -delete 2>/dev/null; find /var/log/pods/ -name "*.log" -mmin +120 -delete 2>/dev/null; rm -rf /var/lib/vector/openshift-logging/logging' 2>/dev/null; done
+```
+
+That deletes log files older than two hours from the nodes, workload logs included. It is real data loss, and it is the same data that is choking the collector, so the trade is usually worth making once. It is not something to put on a schedule.
+
+Bring the forwarder back. If you were going to drop a pipeline anyway, edit the file before applying rather than patching afterwards, so the collector starts with less to read instead of being corrected a cycle later:
+
+```bash
+oc apply -f /tmp/clf-logging.yaml
+```
+
+Give it a minute and check both ends:
+
+```bash
+oc get pods -n openshift-logging -l app.kubernetes.io/component=collector
+```
+
+```bash
+oc logs -n openshift-logging logging-loki-ingester-0 --since=2m | grep -c 'failed to flush'
+```
+
+`Running` with no restarts, and zero. If the restarts keep climbing, the collector still has more to read than it can hold, and the answer is fewer inputs rather than a bigger limit: the `infrastructure` input is usually several times the size of the others.
+
 ### Loki rejects the oldest entries
 
 The distributor says so plainly, once per stream:
