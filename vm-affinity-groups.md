@@ -49,9 +49,9 @@ affinity   app-web  preferred  app-1 web-1
 
 The labels are `<prefix>/anti-affinity=<group>` and `<prefix>/affinity=<group>`. Use a
 domain you own as the prefix. The value is the **group name**, not a list of VMs: a
-label value has a 63 character limit, VM names carry hyphens (so `vm-1-vm-2` cannot be
-split back), and the rule only needs one value that every member shares. The list of
-members lives in the file.
+label value has a 63 character limit that a list of VM names blows through fast, and
+the rule only needs one value that every member shares. The list of members lives in
+the file.
 
 - `plan` changes nothing.
 - `apply` writes labels and rules, then runs `verify`. It never migrates anything.
